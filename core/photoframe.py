@@ -28,7 +28,9 @@ from pathlib import Path
 
 import pygame
 
-from core.api_manager import (get_weather, get_crypto_price, get_news, get_apod, get_custom_apis,)
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from core.api_manager import (get_weather, get_crypto_price, get_news, get_apod, get_custom_apis, get_trivia,)
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
@@ -228,6 +230,10 @@ def fetch_api_data():
     custom_apis = get_custom_apis()
     if custom_apis:
         api_data["custom"] = custom_apis
+
+    trivia = get_trivia()
+    if trivia:
+        api_data["trivia"] = trivia
 
     print(
         f"[PhotoFrame] API slides available: {', '.join(api_data.keys()) if api_data else 'none'}"
@@ -446,6 +452,69 @@ def build_custom_api_slide(screen_size, fonts, custom_api):
 
     return surface
 
+import random
+import html
+
+
+def build_trivia_slide(screen_size, fonts, trivia_list):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render("Trivia", True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    question_data = random.choice(trivia_list)
+
+    question = html.unescape(question_data.get("question", ""))
+    correct = html.unescape(question_data.get("correct_answer", ""))
+    incorrect = [html.unescape(a) for a in question_data.get("incorrect_answers", [])]
+
+    answers = incorrect + [correct]
+    random.shuffle(answers)
+
+    q_rect = pygame.Rect(100, 180, card.width - 80, 150)
+    next_y = draw_wrapped_text(
+        surface,
+        question,
+        fonts["body"],
+        TEXT_COLOR,
+        q_rect,
+        line_gap=6,
+        max_lines=3,
+    )
+
+    y = next_y + 40
+
+    for i, answer in enumerate(answers):
+        label = chr(65 + i) + ". "
+        text = label + answer
+
+        a_rect = pygame.Rect(100, y, card.width - 80, 80)
+
+        draw_wrapped_text(
+            surface,
+            text,
+            fonts["body"],
+            TEXT_COLOR,
+            a_rect,
+            line_gap=4,
+            max_lines=2,
+        )
+
+        y += 90
+
+        if y > screen_h - 160:
+            break
+
+    footer = fonts["small"].render("Source: OpenTDB", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
 
 def build_api_slides(screen_size, fonts, api_data):
     slides = []
@@ -486,7 +555,16 @@ def build_api_slides(screen_size, fonts, api_data):
                     "name": custom_api.get("name", "custom"),
                     "surface": build_custom_api_slide(screen_size, fonts, custom_api),
                 }
-            )    
+            )
+
+    if api_data.get("trivia"):
+        slides.append(
+            {
+                "kind": "api",
+                "name": "trivia",
+                "surface": build_trivia_slide(screen_size, fonts, api_data["trivia"]),
+            }
+        )       
 
     return slides
 

@@ -338,6 +338,21 @@ def get_spotify_token():
         return None
 
 
+def get_trivia():
+    data = _fetch(
+        "https://opentdb.com/api.php",
+        {
+            "amount": 10,
+            "type": "multiple",
+        },
+    )
+
+    if not data or data.get("response_code") != 0:
+        print("[API] Trivia API failed")
+        return None
+
+    return data.get("results", [])
+
 # ─── QUICK TEST ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("\n── Testing built-in APIs ──\n")
