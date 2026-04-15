@@ -456,6 +456,10 @@ import random
 import html
 
 
+import random
+import html
+
+
 def build_trivia_slide(screen_size, fonts, trivia_list):
     screen_w, screen_h = screen_size
     surface = pygame.Surface((screen_w, screen_h))
@@ -476,39 +480,41 @@ def build_trivia_slide(screen_size, fonts, trivia_list):
     answers = incorrect + [correct]
     random.shuffle(answers)
 
-    q_rect = pygame.Rect(100, 180, card.width - 80, 150)
-    next_y = draw_wrapped_text(
+    # question area
+    q_rect = pygame.Rect(100, 180, card.width - 80, 110)
+    draw_wrapped_text(
         surface,
         question,
         fonts["body"],
         TEXT_COLOR,
         q_rect,
-        line_gap=6,
-        max_lines=3,
+        line_gap=4,
+        max_lines=2,
     )
 
-    y = next_y + 40
+    # answers area
+    y = 330
+    answer_height = 58
 
     for i, answer in enumerate(answers):
         label = chr(65 + i) + ". "
         text = label + answer
 
-        a_rect = pygame.Rect(100, y, card.width - 80, 80)
+        answer_box = pygame.Rect(95, y - 6, card.width - 70, answer_height)
+        pygame.draw.rect(surface, (45, 50, 60), answer_box, border_radius=10)
 
+        a_rect = pygame.Rect(115, y + 4, card.width - 110, 42)
         draw_wrapped_text(
             surface,
             text,
-            fonts["body"],
+            fonts["small"],
             TEXT_COLOR,
             a_rect,
-            line_gap=4,
+            line_gap=2,
             max_lines=2,
         )
 
-        y += 90
-
-        if y > screen_h - 160:
-            break
+        y += 72
 
     footer = fonts["small"].render("Source: OpenTDB", True, SUBTEXT_COLOR)
     surface.blit(footer, (100, screen_h - 120))
