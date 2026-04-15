@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import random
+import html
 import urllib.request
 from pathlib import Path
 
@@ -452,18 +453,9 @@ def build_custom_api_slide(screen_size, fonts, custom_api):
 
     return surface
 
-import random
-import html
 
-
-import random
-import html
-
-
-def build_trivia_slide(screen_size, fonts, trivia_list):
-    screen_w, screen_h = screen_size
-    surface = pygame.Surface((screen_w, screen_h))
-    surface.fill(BACKGROUND_COLOR)
+def draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False):
+    screen_w, screen_h = surface.get_size()
 
     title = fonts["title"].render("Trivia", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
@@ -471,56 +463,82 @@ def build_trivia_slide(screen_size, fonts, trivia_list):
     card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
     draw_card(surface, card)
 
-    question_data = random.choice(trivia_list)
-
-    question = html.unescape(question_data.get("question", ""))
-    correct = html.unescape(question_data.get("correct_answer", ""))
-    incorrect = [html.unescape(a) for a in question_data.get("incorrect_answers", [])]
+    question = html.unescape(trivia_item.get("question", ""))
+    correct = html.unescape(trivia_item.get("correct_answer", ""))
+    incorrect = [html.unescape(a) for a in trivia_item.get("incorrect_answers", [])]
 
     answers = incorrect + [correct]
     random.shuffle(answers)
 
-    # question area
-    q_rect = pygame.Rect(100, 180, card.width - 80, 110)
+    q_rect = pygame.Rect(100, 180, card.width - 80, 90)
     draw_wrapped_text(
         surface,
         question,
-        fonts["body"],
+        fonts["small"],
         TEXT_COLOR,
         q_rect,
         line_gap=4,
         max_lines=2,
     )
 
-    # answers area
-    y = 330
-    answer_height = 58
+    start_y = 300
+    answer_box_height = 58
+    gap = 16
 
-    for i, answer in enumerate(answers):
+    for i, answer in enumerate(answers[:4]):
+        box_y = start_y + i * (answer_box_height + gap)
+
+        is_correct = answer == correct
+
+        box_color = (45, 50, 60)
+        border_color = None
+
+        if highlight_correct and is_correct:
+            box_color = (40, 100, 55)
+            border_color = (90, 200, 120)
+
+        answer_box = pygame.Rect(95, box_y, card.width - 70, answer_box_height)
+        pygame.draw.rect(surface, box_color, answer_box, border_radius=10)
+
+        if border_color:
+            pygame.draw.rect(surface, border_color, answer_box, width=3, border_radius=10)
+
         label = chr(65 + i) + ". "
         text = label + answer
 
-        answer_box = pygame.Rect(95, y - 6, card.width - 70, answer_height)
-        pygame.draw.rect(surface, (45, 50, 60), answer_box, border_radius=10)
-
-        a_rect = pygame.Rect(115, y + 4, card.width - 110, 42)
+        text_rect = pygame.Rect(115, box_y + 10, card.width - 110, 36)
         draw_wrapped_text(
             surface,
             text,
             fonts["small"],
             TEXT_COLOR,
-            a_rect,
+            text_rect,
             line_gap=2,
-            max_lines=2,
+            max_lines=1,
         )
 
-        y += 72
+    footer_text = "Source: OpenTDB"
+    if highlight_correct:
+        footer_text += " • Correct answer shown"
 
-    footer = fonts["small"].render("Source: OpenTDB", True, SUBTEXT_COLOR)
+    footer = fonts["small"].render(footer_text, True, SUBTEXT_COLOR)
     surface.blit(footer, (100, screen_h - 120))
 
+
+def build_trivia_question_slide(screen_size, fonts, trivia_item):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+    draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False)
     return surface
 
+
+def build_trivia_answer_slide(screen_size, fonts, trivia_item):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+    draw_trivia_content(surface, fonts, trivia_item, highlight_correct=True)
+    return surface
 
 def build_api_slides(screen_size, fonts, api_data):
     slides = []
@@ -564,13 +582,25 @@ def build_api_slides(screen_size, fonts, api_data):
             )
 
     if api_data.get("trivia"):
+        trivia_item = random.choice(api_data["trivia"])
+
         slides.append(
             {
                 "kind": "api",
-                "name": "trivia",
-                "surface": build_trivia_slide(screen_size, fonts, api_data["trivia"]),
+                "name": "trivia_question",
+                "surface": build_trivia_question_slide(screen_size, fonts, trivia_item),
+                "duration": 12,
             }
-        )       
+        )
+
+        slides.append(
+            {
+                "kind": "api",
+                "name": "trivia_answer",
+                "surface": build_trivia_answer_slide(screen_size, fonts, trivia_item),
+                "duration": 8,
+            }
+        )      
 
     return slides
 
@@ -696,7 +726,10 @@ def run_slideshow(screen, source):
     while True:
         now = time.time()
 
-        if now - last_switch >= SLIDE_DURATION:
+        slide = slides[index]
+        slide_duration = slide.get("duration", SLIDE_DURATION)
+
+        if now - last_switch >= slide_duration:
             index = (index + 1) % len(slides)
             last_switch = now
 
