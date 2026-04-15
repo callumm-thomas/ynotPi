@@ -1,0 +1,30 @@
+{
+  "apis": [
+    {
+      "name": "Exchange Rates",
+      "url": "https://api.exchangerate.host/latest",
+      "params": {
+        "base": "AUD",
+        "symbols": "USD,EUR,NZD"
+      }
+    },
+    {
+      "name": "OpenAI Status",
+      "url": "https://status.openai.com/api/v2/status.json"
+    },
+    {
+      "name": "Football Data",
+      "url": "https://api.football-data.org/v4/matches",
+      "key_name": "FOOTBALL_DATA_KEY",
+      "key_location": "header",
+      "key_param_name": "X-Auth-Token"
+    },
+    {
+      "name": "Custom Weather Proxy",
+      "url": "https://example.com/weather",
+      "key_name": "CUSTOM_WEATHER_KEY",
+      "key_location": "query",
+      "key_param_name": "api_key"
+    }
+  ]
+}

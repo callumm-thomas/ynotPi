@@ -1,80 +1,88 @@
 #!/usr/bin/env python3
-"""
-Photo Frame v1.0 — Source Selector Edition
--------------------------------------------
-Boots into a simple pygame menu where the user picks their photo source:
-  - USB stick
-  - Network share
-  - Both (why not!)
 
-After picking, it jumps straight into the slideshow — fullscreen, crop-to-fill,
-auto-advances every 10 seconds, spacebar to skip manually.
-No clock yet, that's coming later. Just pure photo goodness for now.
+"""
+Photo Frame v2.0 — photos + API slides
+--------------------------------------
+Keeps the original source picker, fullscreen slideshow, crop-to-fill photos,
+and now injects extra ([raw.githubusercontent.com](https://raw.githubusercontent.com/callumm-thomas/ynotPi/main/core/api_manager.py))a.
+
+Flow each cycle:
+- load photos from USB / network / both
+- fetch live API data
+- build a queue of photo slides plus one slide per API
+- display them fullscreen
+
+Keys:
+- space / right arrow = skip
+- esc = quit
+- r = rebuild queue + refresh API data
 """
 
-import pygame
+import io
 import os
 import sys
 import time
 import random
+import urllib.request
 from pathlib import Path
+
+import pygame
+
+from core.api_manager import (get_weather, get_crypto_price, get_news, get_apod, get_custom_apis,)
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-# all the knobs you might want to turn
+SLIDE_DURATION = 10
+BACKGROUND_COLOR = (18, 22, 28)
+TEXT_COLOR = (245, 245, 245)
+SUBTEXT_COLOR = (170, 176, 186)
+HIGHLIGHT_COLOR = (70, 130, 200)
+BUTTON_COLOR = (55, 55, 55)
+BUTTON_HOVER = (75, 75, 75)
+CARD_COLOR = (30, 35, 43)
+CARD_BORDER = (55, 63, 75)
 
-SLIDE_DURATION = 10              # seconds each photo stays on screen
-BACKGROUND_COLOR = (30, 30, 30)  # dark background used everywhere
-TEXT_COLOR       = (255, 255, 255)  # white — main text
-SUBTEXT_COLOR    = (160, 160, 160)  # grey — secondary / hint text
-HIGHLIGHT_COLOR  = (70, 130, 200)   # blue — selected menu button
-BUTTON_COLOR     = (55, 55, 55)     # unselected button background
-BUTTON_HOVER     = (75, 75, 75)     # button when mouse hovers over it
-
-# change this to wherever your network share is mounted
 NETWORK_SHARE_MOUNT = "/mnt/photos"
-
-# photo file types we care about
+USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 
-# Pi usually mounts USB drives here — adjust if yours is different
-USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
+WEATHER_CITY = os.environ.get("WEATHER_CITY", "Sydney")
+CRYPTO_COINS = os.environ.get("CRYPTO_COINS", "bitcoin,ethereum,solana")
+CRYPTO_CURRENCY = os.environ.get("CRYPTO_CURRENCY", "aud")
+NEWS_COUNTRY = os.environ.get("NEWS_COUNTRY", "au")
+NEWS_CATEGORY = os.environ.get("NEWS_CATEGORY", "technology")
+NEWS_PAGE_SIZE = int(os.environ.get("NEWS_PAGE_SIZE", "5"))
+ENABLE_APOD_IMAGE = os.environ.get("ENABLE_APOD_IMAGE", "1") == "1"
 
 
 # ─── PHOTO DISCOVERY ───────────────────────────────────────────────────────────
-
 def find_usb_photos():
-    # walk all known USB mount locations and collect every image file found
     photos = []
     for base in USB_BASE_PATHS:
         if os.path.isdir(base):
             for root, _, files in os.walk(base):
-                for f in files:
-                    if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
-                        photos.append(os.path.join(root, f))
+                for file_name in files:
+                    if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
+                        photos.append(os.path.join(root, file_name))
     return photos
 
 
 def find_network_photos():
-    # check the network share — if it's not mounted or empty, bail out quietly
     photos = []
     if os.path.isdir(NETWORK_SHARE_MOUNT) and os.listdir(NETWORK_SHARE_MOUNT):
         for root, _, files in os.walk(NETWORK_SHARE_MOUNT):
-            for f in files:
-                if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
-                    photos.append(os.path.join(root, f))
+            for file_name in files:
+                if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
+                    photos.append(os.path.join(root, file_name))
     return photos
 
 
 def get_photos(source):
-    # grab photos from whichever source the user picked
-    # 'usb', 'network', or 'both' — then shuffle so it's not the same order every time
     if source == "usb":
         photos = find_usb_photos()
     elif source == "network":
         photos = find_network_photos()
     else:
-        # both — combine, deduplicate, done
         photos = list(set(find_usb_photos() + find_network_photos()))
 
     random.shuffle(photos)
@@ -83,44 +91,414 @@ def get_photos(source):
 
 
 # ─── IMAGE HELPERS ─────────────────────────────────────────────────────────────
-
 def crop_to_fill(image, target_w, target_h):
-    # scale the image so it fills the whole area, then centre-crop
-    # the result — no black bars, no squishing
     img_w, img_h = image.get_size()
     scale = max(target_w / img_w, target_h / img_h)
     new_w = int(img_w * scale)
     new_h = int(img_h * scale)
     scaled = pygame.transform.smoothscale(image, (new_w, new_h))
-    # trim the overflow equally from both sides
+
     x = (new_w - target_w) // 2
     y = (new_h - target_h) // 2
     cropped = scaled.subsurface(pygame.Rect(x, y, target_w, target_h))
-    return cropped.copy()  # .copy() so we're not holding onto the giant scaled surface
+    return cropped.copy()
+
+
+def fit_inside(image, target_w, target_h):
+    img_w, img_h = image.get_size()
+    scale = min(target_w / img_w, target_h / img_h)
+    new_w = max(1, int(img_w * scale))
+    new_h = max(1, int(img_h * scale))
+    return pygame.transform.smoothscale(image, (new_w, new_h))
 
 
 def load_image(path, target_w, target_h):
-    # try to load and prep a photo — returns None if something goes wrong
-    # so the caller can just skip over broken files without crashing
     try:
-        img = pygame.image.load(path).convert()  # .convert() makes blitting faster
-        return crop_to_fill(img, target_w, target_h)
-    except Exception as e:
-        print(f"[PhotoFrame] Skipping {path} — couldn't load it: {e}")
+        image = pygame.image.load(path).convert()
+        return crop_to_fill(image, target_w, target_h)
+    except Exception as error:
+        print(f"[PhotoFrame] Skipping {path} — couldn't load it: {error}")
         return None
 
 
-# ─── MENU SCREEN ───────────────────────────────────────────────────────────────
+def load_remote_image(url):
+    try:
+        with urllib.request.urlopen(url, timeout=8) as response:
+            raw = response.read()
+        return pygame.image.load(io.BytesIO(raw)).convert()
+    except Exception as error:
+        print(f"[PhotoFrame] Couldn't load remote image {url}: {error}")
+        return None
 
+
+# ─── TEXT / UI HELPERS ─────────────────────────────────────────────────────────
+def make_fonts(screen_h):
+    title_size = max(36, screen_h // 18)
+    body_size = max(24, screen_h // 32)
+    small_size = max(18, screen_h // 45)
+
+    return {
+        "title": pygame.font.SysFont("arial", title_size, bold=True),
+        "body": pygame.font.SysFont("arial", body_size),
+        "small": pygame.font.SysFont("arial", small_size),
+    }
+
+
+def draw_wrapped_text(surface, text, font, color, rect, line_gap=8, max_lines=None):
+    words = text.split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = word if not current else current + " " + word
+        if font.size(test)[0] <= rect.width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        if lines:
+            while font.size(lines[-1] + "...")[0] > rect.width and lines[-1]:
+                lines[-1] = lines[-1][:-1]
+            lines[-1] += "..."
+
+    y = rect.top
+    line_height = font.get_height() + line_gap
+
+    for line in lines:
+        if y + font.get_height() > rect.bottom:
+            break
+        rendered = font.render(line, True, color)
+        surface.blit(rendered, (rect.left, y))
+        y += line_height
+
+    return y
+
+
+def draw_card(surface, rect):
+    pygame.draw.rect(surface, CARD_COLOR, rect, border_radius=18)
+    pygame.draw.rect(surface, CARD_BORDER, rect, width=2, border_radius=18)
+
+
+# ─── API DATA ──────────────────────────────────────────────────────────────────
+def fetch_api_data():
+    api_data = {}
+
+    weather = get_weather(WEATHER_CITY)
+    if weather:
+        api_data["weather"] = weather
+
+    crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
+    if crypto:
+        api_data["crypto"] = crypto
+
+    news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
+    if news:
+        api_data["news"] = news
+
+    apod = get_apod()
+    if apod:
+        api_data["apod"] = apod
+
+def fetch_api_data():
+    api_data = {}
+
+    weather = get_weather(WEATHER_CITY)
+    if weather:
+        api_data["weather"] = weather
+
+    crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
+    if crypto:
+        api_data["crypto"] = crypto
+
+    news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
+    if news:
+        api_data["news"] = news
+
+    apod = get_apod()
+    if apod:
+        api_data["apod"] = apod
+
+    custom_apis = get_custom_apis()
+    if custom_apis:
+        api_data["custom"] = custom_apis
+
+    print(
+        f"[PhotoFrame] API slides available: {', '.join(api_data.keys()) if api_data else 'none'}"
+    )
+    return api_data
+
+
+# ─── API SLIDE BUILDERS ────────────────────────────────────────────────────────
+def build_weather_slide(screen_size, fonts, weather):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render("Weather", True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    city = fonts["title"].render(weather.get("city", WEATHER_CITY), True, TEXT_COLOR)
+    temp = fonts["title"].render(f"{round(weather.get('temp', 0))}°C", True, TEXT_COLOR)
+    feels = fonts["body"].render(f"Feels like {round(weather.get('feels_like', 0))}°C", True, SUBTEXT_COLOR)
+    desc = fonts["body"].render(weather.get("description", "").title(), True, TEXT_COLOR)
+    humidity = fonts["body"].render(f"Humidity: {weather.get('humidity', '?')}%", True, TEXT_COLOR)
+
+    surface.blit(city, (100, 180))
+    surface.blit(temp, (100, 270))
+    surface.blit(feels, (100, 360))
+    surface.blit(desc, (100, 430))
+    surface.blit(humidity, (100, 490))
+
+    footer = fonts["small"].render(f"Source: OpenWeather • {WEATHER_CITY}", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
+
+def build_crypto_slide(screen_size, fonts, crypto):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render("Crypto", True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    y = 180
+    currency = CRYPTO_CURRENCY.upper()
+
+    for coin_name, values in crypto.items():
+        price = values.get(CRYPTO_CURRENCY)
+        change = values.get(f"{CRYPTO_CURRENCY}_24h_change")
+
+        coin_text = fonts["body"].render(coin_name.replace("-", " ").title(), True, TEXT_COLOR)
+        price_text = fonts["body"].render(f"{currency} {price:,.2f}" if isinstance(price, (int, float)) else "N/A", True, TEXT_COLOR)
+
+        if isinstance(change, (int, float)):
+            direction = "+" if change >= 0 else ""
+            change_text = fonts["small"].render(f"24h: {direction}{change:.2f}%", True, SUBTEXT_COLOR)
+        else:
+            change_text = fonts["small"].render("24h: N/A", True, SUBTEXT_COLOR)
+
+        surface.blit(coin_text, (100, y))
+        surface.blit(price_text, (screen_w // 2, y))
+        surface.blit(change_text, (screen_w // 2, y + 42))
+        y += 110
+
+        if y > screen_h - 180:
+            break
+
+    footer = fonts["small"].render("Source: CoinGecko", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
+
+def build_news_slide(screen_size, fonts, news_items):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render("News", True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    y = 175
+    for index, item in enumerate(news_items[:5], start=1):
+        bullet = fonts["body"].render(f"{index}.", True, TEXT_COLOR)
+        surface.blit(bullet, (95, y))
+
+        text_rect = pygame.Rect(140, y, card.width - 180, 110)
+        end_y = draw_wrapped_text(
+            surface,
+            item.get("title", "Untitled"),
+            fonts["body"],
+            TEXT_COLOR,
+            text_rect,
+            line_gap=6,
+            max_lines=2,
+        )
+
+        source_text = item.get("source", "")
+        published_text = item.get("published", "")[:10] if item.get("published") else ""
+        meta = " • ".join(part for part in [source_text, published_text] if part)
+        meta_render = fonts["small"].render(meta, True, SUBTEXT_COLOR)
+        surface.blit(meta_render, (140, end_y + 4))
+
+        y += 105
+        if y > screen_h - 180:
+            break
+
+    footer = fonts["small"].render(f"Source: News API • {NEWS_COUNTRY.upper()} / {NEWS_CATEGORY}", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
+
+def build_apod_slide(screen_size, fonts, apod):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render("NASA APOD", True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    text_x = 100
+    text_w = card.width - 80
+
+    media_type = apod.get("media_type", "")
+    remote_url = apod.get("url", "")
+
+    if ENABLE_APOD_IMAGE and media_type == "image" and remote_url:
+        image = load_remote_image(remote_url)
+        if image:
+            fitted = fit_inside(image, int(card.width * 0.48), int(card.height * 0.7))
+            image_x = card.right - fitted.get_width() - 40
+            image_y = card.top + 40
+            surface.blit(fitted, (image_x, image_y))
+            text_w = image_x - text_x - 30
+
+    title_rect = pygame.Rect(text_x, 180, text_w, 120)
+    next_y = draw_wrapped_text(surface, apod.get("title", "Astronomy Picture of the Day"), fonts["body"], TEXT_COLOR, title_rect, max_lines=3)
+
+    date_text = fonts["small"].render(apod.get("date", ""), True, SUBTEXT_COLOR)
+    surface.blit(date_text, (text_x, next_y + 8))
+
+    explanation_rect = pygame.Rect(text_x, next_y + 50, text_w, card.height - 180)
+    draw_wrapped_text(surface, apod.get("explanation", ""), fonts["small"], TEXT_COLOR, explanation_rect, line_gap=5, max_lines=10)
+
+    footer = fonts["small"].render("Source: NASA APOD", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
+def flatten_custom_data(data, prefix=""):
+    rows = []
+
+    if isinstance(data, dict):
+        for key, value in data.items():
+            new_prefix = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(flatten_custom_data(value, new_prefix))
+
+    elif isinstance(data, list):
+        for index, value in enumerate(data[:8]):
+            new_prefix = f"{prefix}[{index}]"
+            rows.extend(flatten_custom_data(value, new_prefix))
+
+    else:
+        rows.append((prefix, str(data)))
+
+    return rows
+
+
+def build_custom_api_slide(screen_size, fonts, custom_api):
+    screen_w, screen_h = screen_size
+    surface = pygame.Surface((screen_w, screen_h))
+    surface.fill(BACKGROUND_COLOR)
+
+    title = fonts["title"].render(custom_api.get("name", "Custom API"), True, TEXT_COLOR)
+    surface.blit(title, (60, 40))
+
+    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    draw_card(surface, card)
+
+    rows = flatten_custom_data(custom_api.get("data", {}))[:10]
+
+    y = 180
+    for key, value in rows:
+        key_text = fonts["small"].render(str(key), True, SUBTEXT_COLOR)
+        surface.blit(key_text, (100, y))
+
+        value_rect = pygame.Rect(100, y + 28, card.width - 80, 55)
+        draw_wrapped_text(
+            surface,
+            value,
+            fonts["body"],
+            TEXT_COLOR,
+            value_rect,
+            line_gap=4,
+            max_lines=2,
+        )
+
+        y += 85
+        if y > screen_h - 170:
+            break
+
+    footer = fonts["small"].render("Source: custom API", True, SUBTEXT_COLOR)
+    surface.blit(footer, (100, screen_h - 120))
+
+    return surface
+
+
+def build_api_slides(screen_size, fonts, api_data):
+    slides = []
+
+    if api_data.get("weather"):
+        slides.append({
+            "kind": "api",
+            "name": "weather",
+            "surface": build_weather_slide(screen_size, fonts, api_data["weather"]),
+        })
+
+    if api_data.get("crypto"):
+        slides.append({
+            "kind": "api",
+            "name": "crypto",
+            "surface": build_crypto_slide(screen_size, fonts, api_data["crypto"]),
+        })
+
+    if api_data.get("news"):
+        slides.append({
+            "kind": "api",
+            "name": "news",
+            "surface": build_news_slide(screen_size, fonts, api_data["news"]),
+        })
+
+    if api_data.get("apod"):
+        slides.append({
+            "kind": "api",
+            "name": "apod",
+            "surface": build_apod_slide(screen_size, fonts, api_data["apod"]),
+        })
+
+    if api_data.get("custom"):
+        for custom_api in api_data["custom"]:
+            slides.append(
+                {
+                    "kind": "api",
+                    "name": custom_api.get("name", "custom"),
+                    "surface": build_custom_api_slide(screen_size, fonts, custom_api),
+                }
+            )    
+
+    return slides
+
+
+# ─── MENU SCREEN ───────────────────────────────────────────────────────────────
 class Button:
-    # a simple clickable button — tracks hover state and returns True when clicked
     def __init__(self, rect, label, value):
-        self.rect  = pygame.Rect(rect)
+        self.rect = pygame.Rect(rect)
         self.label = label
-        self.value = value  # what this button represents (e.g. "usb", "network", "both")
+        self.value = value
 
     def draw(self, surface, font, selected=False):
-        # pick the right colour depending on whether this button is selected or hovered
         mouse_pos = pygame.mouse.get_pos()
         if selected:
             color = HIGHLIGHT_COLOR
@@ -129,17 +507,13 @@ class Button:
         else:
             color = BUTTON_COLOR
 
-        # draw the rounded rectangle background
         pygame.draw.rect(surface, color, self.rect, border_radius=10)
-
-        # centre the label text inside the button
-        text_surf = font.render(self.label, True, TEXT_COLOR)
-        tx = self.rect.centerx - text_surf.get_width() // 2
-        ty = self.rect.centery - text_surf.get_height() // 2
-        surface.blit(text_surf, (tx, ty))
+        text_surface = font.render(self.label, True, TEXT_COLOR)
+        tx = self.rect.centerx - text_surface.get_width() // 2
+        ty = self.rect.centery - text_surface.get_height() // 2
+        surface.blit(text_surface, (tx, ty))
 
     def is_clicked(self, event):
-        # returns True if this button was clicked with the left mouse button
         return (
             event.type == pygame.MOUSEBUTTONDOWN
             and event.button == 1
@@ -148,178 +522,161 @@ class Button:
 
 
 def show_menu(screen, screen_w, screen_h):
-    """
-    Draw the source selection menu and wait for the user to pick one.
-    Returns one of: 'usb', 'network', 'both'
-    """
-    title_font  = pygame.font.SysFont("dejavusans", 48, bold=True)
-    button_font = pygame.font.SysFont("dejavusans", 32)
-    hint_font   = pygame.font.SysFont("dejavusans", 22)
-
-    # lay out three buttons vertically in the centre of the screen
-    btn_w, btn_h = 340, 70
-    btn_x = screen_w // 2 - btn_w // 2
-    spacing = 24  # gap between buttons
-
-    # total block height so we can vertically centre the whole group
-    total_h = 3 * btn_h + 2 * spacing
-    start_y = screen_h // 2 - total_h // 2 + 40  # +40 to leave room for the title above
+    title_font = pygame.font.SysFont("arial", 44, bold=True)
+    body_font = pygame.font.SysFont("arial", 26)
 
     buttons = [
-        Button((btn_x, start_y,                        btn_w, btn_h), "📁  USB Stick",    "usb"),
-        Button((btn_x, start_y + btn_h + spacing,      btn_w, btn_h), "🌐  Network Share", "network"),
-        Button((btn_x, start_y + 2 * (btn_h + spacing),btn_w, btn_h), "✨  Both",          "both"),
+        Button((screen_w // 2 - 180, 250, 360, 64), "USB stick", "usb"),
+        Button((screen_w // 2 - 180, 340, 360, 64), "Network share", "network"),
+        Button((screen_w // 2 - 180, 430, 360, 64), "Both", "both"),
     ]
+    selected_index = 0
 
-    selected_value = None  # we'll set this when the user clicks something
-
-    while selected_value is None:
+    while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
-                sys.exit()  # let them quit from the menu at least
-            for btn in buttons:
-                if btn.is_clicked(event):
-                    selected_value = btn.value  # got a pick — exit the loop
+                sys.exit()
 
-        # draw the menu fresh each frame so hover effects update
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    pygame.quit()
+                    sys.exit()
+                if event.key == pygame.K_UP:
+                    selected_index = (selected_index - 1) % len(buttons)
+                if event.key == pygame.K_DOWN:
+                    selected_index = (selected_index + 1) % len(buttons)
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    return buttons[selected_index].value
+
+            for index, button in enumerate(buttons):
+                if button.is_clicked(event):
+                    return button.value
+                if event.type == pygame.MOUSEMOTION and button.rect.collidepoint(event.pos):
+                    selected_index = index
+
         screen.fill(BACKGROUND_COLOR)
 
-        # title up top
-        title = title_font.render("Photo Frame", True, TEXT_COLOR)
-        screen.blit(title, (screen_w // 2 - title.get_width() // 2, start_y - 100))
+        title = title_font.render("Choose photo source", True, TEXT_COLOR)
+        subtitle = body_font.render("Photos will rotate with live API slides", True, SUBTEXT_COLOR)
 
-        # subtitle / instruction
-        sub = hint_font.render("Where are your photos?", True, SUBTEXT_COLOR)
-        screen.blit(sub, (screen_w // 2 - sub.get_width() // 2, start_y - 50))
+        screen.blit(title, (screen_w // 2 - title.get_width() // 2, 120))
+        screen.blit(subtitle, (screen_w // 2 - subtitle.get_width() // 2, 180))
 
-        # draw all three buttons
-        for btn in buttons:
-            btn.draw(screen, button_font)
-
-        # little hint at the bottom
-        hint = hint_font.render("Click a source to begin", True, SUBTEXT_COLOR)
-        screen.blit(hint, (screen_w // 2 - hint.get_width() // 2, screen_h - 60))
+        for index, button in enumerate(buttons):
+            button.draw(screen, body_font, selected=(index == selected_index))
 
         pygame.display.flip()
-        pygame.time.Clock().tick(30)
-
-    return selected_value
+        pygame.time.wait(16)
 
 
-# ─── SLIDESHOW ─────────────────────────────────────────────────────────────────
+# ─── SLIDESHOW QUEUE ───────────────────────────────────────────────────────────
+def build_slide_queue(source, screen_w, screen_h, fonts):
+    photos = get_photos(source)
+    api_data = fetch_api_data()
+    api_slides = build_api_slides((screen_w, screen_h), fonts, api_data)
 
-def run_slideshow(screen, screen_w, screen_h, photos):
-    """
-    The main slideshow loop — fullscreen photos, auto-advance every 10s,
-    spacebar to skip. No exit keys because kiosk mode.
-    """
-    if not photos:
-        # nothing to show — put up a message and hang around
-        _show_no_photos_screen(screen, screen_w, screen_h)
-        return
+    queue = []
 
-    photo_index   = 0
-    current_surf  = None
-    last_advance  = time.time()
-    needs_reload  = True
+    for path in photos:
+        queue.append({"kind": "photo", "path": path, "surface": None})
 
-    # re-scan every 60s in case someone plugs in a USB mid-session
-    rescan_interval = 60
-    last_rescan     = time.time()
+    queue.extend(api_slides)
 
-    def load_current():
-        # try to load the photo at photo_index — skip broken ones automatically
-        nonlocal current_surf
-        surf     = None
-        attempts = 0
-        while surf is None and attempts < len(photos):
-            path = photos[photo_index % len(photos)]
-            surf = load_image(path, screen_w, screen_h)
-            if surf is None:
-                # file was bad — ditch it from the list so we never try again
-                photos.pop(photo_index % max(len(photos), 1))
-                attempts += 1
-        current_surf = surf
+    if not queue:
+        fallback = pygame.Surface((screen_w, screen_h))
+        fallback.fill(BACKGROUND_COLOR)
+        title = fonts["title"].render("No slides available", True, TEXT_COLOR)
+        hint = fonts["body"].render("Add photos or configure API keys.", True, SUBTEXT_COLOR)
+        fallback.blit(title, (screen_w // 2 - title.get_width() // 2, screen_h // 2 - 40))
+        fallback.blit(hint, (screen_w // 2 - hint.get_width() // 2, screen_h // 2 + 20))
+        queue.append({"kind": "api", "name": "fallback", "surface": fallback})
 
-    fps_clock = pygame.time.Clock()
-    running   = True
+    print(f"[PhotoFrame] Queue ready: {len(photos)} photo slide(s), {len(api_slides)} API slide(s)")
+    return queue
 
-    while running:
+
+# ─── MAIN DISPLAY LOOP ─────────────────────────────────────────────────────────
+def run_slideshow(screen, source):
+    screen_w, screen_h = screen.get_size()
+    fonts = make_fonts(screen_h)
+
+    slides = build_slide_queue(source, screen_w, screen_h, fonts)
+    index = 0
+    current_surface = None
+    current_photo_path = None
+    last_switch = 0
+
+    clock = pygame.time.Clock()
+
+    while True:
         now = time.time()
+
+        if now - last_switch >= SLIDE_DURATION:
+            index = (index + 1) % len(slides)
+            last_switch = now
+
+            if index == 0:
+                slides = build_slide_queue(source, screen_w, screen_h, fonts)
+
+            current_surface = None
+            current_photo_path = None
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pass  # kiosk mode — ignore the window close button
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
-                    # spacebar skips to the next photo immediately
-                    photo_index  = (photo_index + 1) % max(len(photos), 1)
-                    needs_reload = True
-                    last_advance = now  # reset timer so new photo gets a full 10s
+                return
 
-        # time's up — move on to the next photo
-        if photos and (now - last_advance) >= SLIDE_DURATION:
-            photo_index  = (photo_index + 1) % len(photos)
-            needs_reload = True
-            last_advance = now
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return
+                if event.key in (pygame.K_SPACE, pygame.K_RIGHT):
+                    index = (index + 1) % len(slides)
+                    last_switch = now
+                    current_surface = None
+                    current_photo_path = None
+                if event.key == pygame.K_r:
+                    slides = build_slide_queue(source, screen_w, screen_h, fonts)
+                    index = 0
+                    last_switch = now
+                    current_surface = None
+                    current_photo_path = None
 
-        # load the new photo if something asked for it
-        if needs_reload:
-            load_current()
-            needs_reload = False
+        slide = slides[index]
 
-        # periodically check for new photos (e.g. USB just got plugged in)
-        if now - last_rescan >= rescan_interval:
-            # re-use the same source as before — we'd need to store it to be smarter here
-            last_rescan = now
+        if slide["kind"] == "photo":
+            if current_surface is None or current_photo_path != slide["path"]:
+                current_surface = load_image(slide["path"], screen_w, screen_h)
+                current_photo_path = slide["path"]
 
-        # ── draw ──
-        screen.fill(BACKGROUND_COLOR)  # clear first
+            if current_surface is None:
+                index = (index + 1) % len(slides)
+                last_switch = now
+                continue
 
-        if current_surf:
-            screen.blit(current_surf, (0, 0))  # photo fills the whole screen
         else:
-            _show_no_photos_screen(screen, screen_w, screen_h)
+            if current_surface is None:
+                current_surface = slide["surface"]
+                current_photo_path = None
 
+        screen.blit(current_surface, (0, 0))
         pygame.display.flip()
-        fps_clock.tick(30)  # 30fps — enough for a photo frame, won't stress the Pi
+        clock.tick(30)
 
 
-def _show_no_photos_screen(screen, screen_w, screen_h):
-    # friendly message when there's nothing to display
-    screen.fill(BACKGROUND_COLOR)
-    font = pygame.font.SysFont("dejavusans", 34)
-    msg  = font.render("No photos found. Check your source and try again.", True, SUBTEXT_COLOR)
-    screen.blit(msg, (screen_w // 2 - msg.get_width() // 2, screen_h // 2 - msg.get_height() // 2))
-    pygame.display.flip()
-    time.sleep(3)  # pause so the user can actually read it
-
-
-# ─── MAIN ──────────────────────────────────────────────────────────────────────
-
+# ─── ENTRY POINT ───────────────────────────────────────────────────────────────
 def main():
     pygame.init()
-    pygame.mouse.set_visible(True)  # keep the cursor visible during the menu
+    pygame.mouse.set_visible(True)
 
-    # go fullscreen using whatever resolution the display is running at
-    screen_info = pygame.display.Info()
-    screen_w, screen_h = screen_info.current_w, screen_info.current_h
-    screen = pygame.display.set_mode((screen_w, screen_h), pygame.FULLSCREEN)
-    pygame.display.set_caption("Photo Frame")
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    pygame.display.set_caption("ynotPi Photo Frame")
 
-    # step 1: show the source menu and wait for a pick
+    screen_w, screen_h = screen.get_size()
+    print(f"[PhotoFrame] Running at {screen_w}x{screen_h}")
+
     source = show_menu(screen, screen_w, screen_h)
-    print(f"[PhotoFrame] User chose: {source}")
-
-    # hide the cursor once we're into the slideshow — no need for it anymore
     pygame.mouse.set_visible(False)
-
-    # step 2: load photos from the chosen source
-    photos = get_photos(source)
-
-    # step 3: run the slideshow until the end of time (or power off)
-    run_slideshow(screen, screen_w, screen_h, photos)
+    run_slideshow(screen, source)
 
     pygame.quit()
     sys.exit()
