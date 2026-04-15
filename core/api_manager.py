@@ -344,7 +344,7 @@ def get_trivia():
     data = _fetch(
         "https://opentdb.com/api.php",
         {
-            "amount": 10,
+            "amount": 100,
             "type": "multiple",
         },
     )
