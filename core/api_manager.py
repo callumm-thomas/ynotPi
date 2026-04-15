@@ -234,7 +234,7 @@ def get_crypto_price(coin_ids="bitcoin,ethereum", currency="aud"):
         "include_24hr_change": "true",
     }
 
-    url = "https://api.coingecko.com/api/v3/simple/price"
+    url = "https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&ids=bitcoin&x_cg_demo_api_key="
 
     if key:
         params["x_cg_pro_api_key"] = key
