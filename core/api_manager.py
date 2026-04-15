@@ -226,7 +226,8 @@ def get_weather(city="Sydney", units="metric"):
 
 # ─── COINGECKO ─────────────────────────────────────────────────────────────────
 def get_crypto_price(coin_ids="bitcoin,ethereum", currency="aud"):
-    key = _get_key("COINGECKO_API_KEY")
+    # optional key only - don't use _get_key here
+    key = _SECRETS.get("COINGECKO_API_KEY", "").strip()
 
     params = {
         "ids": coin_ids,
@@ -234,8 +235,9 @@ def get_crypto_price(coin_ids="bitcoin,ethereum", currency="aud"):
         "include_24hr_change": "true",
     }
 
-    url = "https://api.coingecko.com/api/v3/simple/price?vs_currencies=usd&ids=bitcoin&x_cg_demo_api_key="
+    url = "https://api.coingecko.com/api/v3/simple/price"
 
+    # only include pro key if one is actually provided
     if key:
         params["x_cg_pro_api_key"] = key
 
