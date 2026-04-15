@@ -48,6 +48,7 @@ CARD_BORDER = (55, 63, 75)
 NETWORK_SHARE_MOUNT = "/mnt/photos"
 USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+LOCAL_PHOTO_PATH = "assets/photos"
 
 WEATHER_CITY = os.environ.get("WEATHER_CITY", "Sydney")
 CRYPTO_COINS = os.environ.get("CRYPTO_COINS", "bitcoin,ethereum,solana")
@@ -79,17 +80,28 @@ def find_network_photos():
                     photos.append(os.path.join(root, file_name))
     return photos
 
+def find_local_photos():
+    photos = []
+    if os.path.isdir(LOCAL_PHOTO_PATH):
+        for root, _, files in os.walk(LOCAL_PHOTO_PATH):
+            for file_name in files:
+                if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
+                    photos.append(os.path.join(root, file_name))
+    return photos
 
-def get_photos(source):
-    if source == "usb":
-        photos = find_usb_photos()
-    elif source == "network":
-        photos = find_network_photos()
-    else:
-        photos = list(set(find_usb_photos() + find_network_photos()))
+def get_photos():
+    usb_photos = find_usb_photos()
+    network_photos = find_network_photos()
+    local_photos = find_local_photos()
 
+    photos = list(set(usb_photos + network_photos + local_photos))
     random.shuffle(photos)
-    print(f"[PhotoFrame] Loaded {len(photos)} photo(s) from source: {source}")
+
+    print(
+        f"[PhotoFrame] Loaded {len(photos)} photo(s) "
+        f"(USB: {len(usb_photos)}, Network: {len(network_photos)}, Local: {len(local_photos)})"
+    )
+
     return photos
 
 
@@ -604,89 +616,9 @@ def build_api_slides(screen_size, fonts, api_data):
 
     return slides
 
-
-# ─── MENU SCREEN ───────────────────────────────────────────────────────────────
-class Button:
-    def __init__(self, rect, label, value):
-        self.rect = pygame.Rect(rect)
-        self.label = label
-        self.value = value
-
-    def draw(self, surface, font, selected=False):
-        mouse_pos = pygame.mouse.get_pos()
-        if selected:
-            color = HIGHLIGHT_COLOR
-        elif self.rect.collidepoint(mouse_pos):
-            color = BUTTON_HOVER
-        else:
-            color = BUTTON_COLOR
-
-        pygame.draw.rect(surface, color, self.rect, border_radius=10)
-        text_surface = font.render(self.label, True, TEXT_COLOR)
-        tx = self.rect.centerx - text_surface.get_width() // 2
-        ty = self.rect.centery - text_surface.get_height() // 2
-        surface.blit(text_surface, (tx, ty))
-
-    def is_clicked(self, event):
-        return (
-            event.type == pygame.MOUSEBUTTONDOWN
-            and event.button == 1
-            and self.rect.collidepoint(event.pos)
-        )
-
-
-def show_menu(screen, screen_w, screen_h):
-    title_font = pygame.font.SysFont("arial", 44, bold=True)
-    body_font = pygame.font.SysFont("arial", 26)
-
-    buttons = [
-        Button((screen_w // 2 - 180, 250, 360, 64), "USB stick", "usb"),
-        Button((screen_w // 2 - 180, 340, 360, 64), "Network share", "network"),
-        Button((screen_w // 2 - 180, 430, 360, 64), "Both", "both"),
-    ]
-    selected_index = 0
-
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    pygame.quit()
-                    sys.exit()
-                if event.key == pygame.K_UP:
-                    selected_index = (selected_index - 1) % len(buttons)
-                if event.key == pygame.K_DOWN:
-                    selected_index = (selected_index + 1) % len(buttons)
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    return buttons[selected_index].value
-
-            for index, button in enumerate(buttons):
-                if button.is_clicked(event):
-                    return button.value
-                if event.type == pygame.MOUSEMOTION and button.rect.collidepoint(event.pos):
-                    selected_index = index
-
-        screen.fill(BACKGROUND_COLOR)
-
-        title = title_font.render("Choose photo source", True, TEXT_COLOR)
-        subtitle = body_font.render("Photos will rotate with live API slides", True, SUBTEXT_COLOR)
-
-        screen.blit(title, (screen_w // 2 - title.get_width() // 2, 120))
-        screen.blit(subtitle, (screen_w // 2 - subtitle.get_width() // 2, 180))
-
-        for index, button in enumerate(buttons):
-            button.draw(screen, body_font, selected=(index == selected_index))
-
-        pygame.display.flip()
-        pygame.time.wait(16)
-
-
 # ─── SLIDESHOW QUEUE ───────────────────────────────────────────────────────────
-def build_slide_queue(source, screen_w, screen_h, fonts):
-    photos = get_photos(source)
+def build_slide_queue(screen_w, screen_h, fonts):
+    photos = get_photos()
     api_data = fetch_api_data()
     api_slides = build_api_slides((screen_w, screen_h), fonts, api_data)
 
@@ -711,11 +643,11 @@ def build_slide_queue(source, screen_w, screen_h, fonts):
 
 
 # ─── MAIN DISPLAY LOOP ─────────────────────────────────────────────────────────
-def run_slideshow(screen, source):
+def run_slideshow(screen):
     screen_w, screen_h = screen.get_size()
     fonts = make_fonts(screen_h)
 
-    slides = build_slide_queue(source, screen_w, screen_h, fonts)
+    slides = build_slide_queue(screen_w, screen_h, fonts)
     index = 0
     current_surface = None
     current_photo_path = None
@@ -734,7 +666,7 @@ def run_slideshow(screen, source):
             last_switch = now
 
             if index == 0:
-                slides = build_slide_queue(source, screen_w, screen_h, fonts)
+                slides = build_slide_queue(screen_w, screen_h, fonts)
 
             current_surface = None
             current_photo_path = None
@@ -752,7 +684,7 @@ def run_slideshow(screen, source):
                     current_surface = None
                     current_photo_path = None
                 if event.key == pygame.K_r:
-                    slides = build_slide_queue(source, screen_w, screen_h, fonts)
+                    slides = build_slide_queue(screen_w, screen_h, fonts)
                     index = 0
                     last_switch = now
                     current_surface = None
@@ -791,9 +723,8 @@ def main():
     screen_w, screen_h = screen.get_size()
     print(f"[PhotoFrame] Running at {screen_w}x{screen_h}")
 
-    source = show_menu(screen, screen_w, screen_h)
     pygame.mouse.set_visible(False)
-    run_slideshow(screen, source)
+    run_slideshow(screen)
 
     pygame.quit()
     sys.exit()
