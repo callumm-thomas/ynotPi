@@ -221,25 +221,6 @@ def fetch_api_data():
     if apod:
         api_data["apod"] = apod
 
-def fetch_api_data():
-    api_data = {}
-
-    weather = get_weather(WEATHER_CITY)
-    if weather:
-        api_data["weather"] = weather
-
-    crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
-    if crypto:
-        api_data["crypto"] = crypto
-
-    news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
-    if news:
-        api_data["news"] = news
-
-    apod = get_apod()
-    if apod:
-        api_data["apod"] = apod
-
     custom_apis = get_custom_apis()
     if custom_apis:
         api_data["custom"] = custom_apis
@@ -651,7 +632,7 @@ def run_slideshow(screen):
     index = 0
     current_surface = None
     current_photo_path = None
-    last_switch = 0
+    last_switch = time.time()
 
     clock = pygame.time.Clock()
 
