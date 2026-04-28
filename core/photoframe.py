@@ -461,7 +461,9 @@ def draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False):
     incorrect = [html.unescape(a) for a in trivia_item.get("incorrect_answers", [])]
 
     answers = incorrect + [correct]
+    random.seed(hash(question))
     random.shuffle(answers)
+    random.seed()  # reset so nothing else is affected
 
     q_rect = pygame.Rect(100, 180, card.width - 80, 90)
     draw_wrapped_text(
