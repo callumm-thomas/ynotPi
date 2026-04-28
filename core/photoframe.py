@@ -47,7 +47,7 @@ CARD_BORDER = (55, 63, 75)
 
 NETWORK_SHARE_MOUNT = "/mnt/photos"
 USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".webp"}
 LOCAL_PHOTO_PATH = "assets/photos"
 
 WEATHER_CITY = os.environ.get("WEATHER_CITY", "Sydney")
