@@ -1,0 +1,17 @@
+{
+  "admin_hotkey": "f1",
+  "sources": {
+    "local": true,
+    "usb": true,
+    "network": true
+  },
+  "content": {
+    "photos": true,
+    "weather": true,
+    "crypto": true,
+    "news": true,
+    "apod": true,
+    "trivia": true,
+    "custom": {}
+  }
+}

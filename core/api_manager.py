@@ -86,6 +86,22 @@ def load_custom_api_configs():
         return []
 
 
+def save_custom_api_configs(configs):
+    """Write a full list of custom API configs back to apis.json."""
+    CUSTOM_APIS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CUSTOM_APIS_PATH, "w", encoding="utf-8") as file:
+        json.dump({"apis": configs}, file, indent=2)
+        file.write("\n")
+
+
+def add_custom_api_config(config):
+    """Append one new custom API config to apis.json and save it."""
+    configs = load_custom_api_configs()
+    configs.append(config)
+    save_custom_api_configs(configs)
+    return configs
+
+
 # ─── SHARED HTTP HELPER ────────────────────────────────────────────────────────
 def _fetch(url, params=None, headers=None):
     if params:

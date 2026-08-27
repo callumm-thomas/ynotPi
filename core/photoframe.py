@@ -16,6 +16,7 @@ Keys:
 - space / right arrow = skip
 - esc = quit
 - r = rebuild queue + refresh API data
+- admin hotkey (default F1, customisable in the admin panel) = open admin panel
 """
 
 import io
@@ -32,6 +33,7 @@ import pygame
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from core.api_manager import (get_weather, get_crypto_price, get_news, get_apod, get_custom_apis, get_trivia,)
+from core import admin_panel
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
@@ -90,9 +92,15 @@ def find_local_photos():
     return photos
 
 def get_photos():
-    usb_photos = find_usb_photos()
-    network_photos = find_network_photos()
-    local_photos = find_local_photos()
+    settings = admin_panel.load_settings()
+
+    if not admin_panel.is_content_enabled(settings, "photos"):
+        print("[PhotoFrame] Photos are disabled in the admin panel — skipping.")
+        return []
+
+    usb_photos = find_usb_photos() if admin_panel.is_source_enabled(settings, "usb") else []
+    network_photos = find_network_photos() if admin_panel.is_source_enabled(settings, "network") else []
+    local_photos = find_local_photos() if admin_panel.is_source_enabled(settings, "local") else []
 
     photos = list(set(usb_photos + network_photos + local_photos))
     random.shuffle(photos)
@@ -203,31 +211,40 @@ def draw_card(surface, rect):
 
 # ─── API DATA ──────────────────────────────────────────────────────────────────
 def fetch_api_data():
+    settings = admin_panel.load_settings()
     api_data = {}
 
-    weather = get_weather(WEATHER_CITY)
-    if weather:
-        api_data["weather"] = weather
+    if admin_panel.is_content_enabled(settings, "weather"):
+        weather = get_weather(WEATHER_CITY)
+        if weather:
+            api_data["weather"] = weather
 
-    crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
-    if crypto:
-        api_data["crypto"] = crypto
+    if admin_panel.is_content_enabled(settings, "crypto"):
+        crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
+        if crypto:
+            api_data["crypto"] = crypto
 
-    news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
-    if news:
-        api_data["news"] = news
+    if admin_panel.is_content_enabled(settings, "news"):
+        news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
+        if news:
+            api_data["news"] = news
 
-    apod = get_apod()
-    if apod:
-        api_data["apod"] = apod
+    if admin_panel.is_content_enabled(settings, "apod"):
+        apod = get_apod()
+        if apod:
+            api_data["apod"] = apod
 
-    custom_apis = get_custom_apis()
+    custom_apis = [
+        item for item in get_custom_apis()
+        if admin_panel.is_content_enabled(settings, "custom", custom_name=item.get("name"))
+    ]
     if custom_apis:
         api_data["custom"] = custom_apis
 
-    trivia = get_trivia()
-    if trivia:
-        api_data["trivia"] = trivia
+    if admin_panel.is_content_enabled(settings, "trivia"):
+        trivia = get_trivia()
+        if trivia:
+            api_data["trivia"] = trivia
 
     print(
         f"[PhotoFrame] API slides available: {', '.join(api_data.keys()) if api_data else 'none'}"
@@ -630,11 +647,24 @@ def run_slideshow(screen):
     screen_w, screen_h = screen.get_size()
     fonts = make_fonts(screen_h)
 
+    theme_colors = {
+        "BACKGROUND_COLOR": BACKGROUND_COLOR,
+        "TEXT_COLOR": TEXT_COLOR,
+        "SUBTEXT_COLOR": SUBTEXT_COLOR,
+        "HIGHLIGHT_COLOR": HIGHLIGHT_COLOR,
+        "BUTTON_COLOR": BUTTON_COLOR,
+        "BUTTON_HOVER": BUTTON_HOVER,
+        "CARD_COLOR": CARD_COLOR,
+        "CARD_BORDER": CARD_BORDER,
+    }
+
     slides = build_slide_queue(screen_w, screen_h, fonts)
     index = 0
     current_surface = None
     current_photo_path = None
     last_switch = time.time()
+
+    admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
 
     clock = pygame.time.Clock()
 
@@ -659,6 +689,15 @@ def run_slideshow(screen):
                 return
 
             if event.type == pygame.KEYDOWN:
+                if event.key == admin_key:
+                    admin_panel.run_admin_panel(screen, fonts, theme_colors)
+                    admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
+                    slides = build_slide_queue(screen_w, screen_h, fonts)
+                    index = 0
+                    last_switch = time.time()
+                    current_surface = None
+                    current_photo_path = None
+                    continue
                 if event.key == pygame.K_ESCAPE:
                     return
                 if event.key in (pygame.K_SPACE, pygame.K_RIGHT):
