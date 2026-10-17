@@ -4,7 +4,7 @@
 Photo Frame v2.0 — photos + API slides
 --------------------------------------
 Keeps the original source picker, fullscreen slideshow, crop-to-fill photos,
-and now injects extra ([raw.githubusercontent.com](https://raw.githubusercontent.com/callumm-thomas/ynotPi/main/core/api_manager.py))a.
+and now injects extra slides with live API data.
 
 Flow each cycle:
 - load photos from USB / network / both
@@ -14,10 +14,18 @@ Flow each cycle:
 
 Keys:
 - space / right arrow = skip
-- esc = quit
+- esc = quit (dev mode only - on the Pi, quitting goes through Technician mode > Power)
 - r = rebuild queue + refresh API data
-- admin hotkey (default F1, customisable in the admin panel) = open admin panel
+- admin hotkey (default F1, customisable in the admin panel) = open admin panel (asks for a PIN)
+
+Dev mode (for testing on a laptop/desktop instead of the Pi):
+- python core/photoframe.py --dev          -> resizable window, mouse visible,
+                                              dummy data for weather/news/APOD if their key isn't set
+- python core/photoframe.py --dev --dummy  -> every feed uses dummy data (no internet needed)
+Without --dev it runs fullscreen exactly like it always has.
 """
+
+import argparse
 
 import io
 import os
@@ -30,10 +38,21 @@ from pathlib import Path
 
 import pygame
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+# repo root (the folder above core/) - paths hang off this so it doesn't matter where we're launched from
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.append(str(BASE_DIR))
 
-from core.api_manager import (get_weather, get_crypto_price, get_news, get_apod, get_custom_apis, get_trivia,)
+# start the log file before anything else prints, so startup messages get captured too
+from core import logbook
+logbook.start()
+
+from core.api_manager import (
+    get_weather, get_crypto_price, get_news, get_apod, get_custom_apis, get_trivia,
+    has_key, load_custom_api_configs,
+)
 from core import admin_panel
+from core import dummy_data
+from core import technician
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
@@ -50,7 +69,7 @@ CARD_BORDER = (55, 63, 75)
 NETWORK_SHARE_MOUNT = "/mnt/photos"
 USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".webp"}
-LOCAL_PHOTO_PATH = "assets/photos"
+LOCAL_PHOTO_PATH = str(BASE_DIR / "assets" / "photos")  # anchored to the repo, not whatever folder we got launched from
 
 WEATHER_CITY = os.environ.get("WEATHER_CITY", "Sydney")
 CRYPTO_COINS = os.environ.get("CRYPTO_COINS", "bitcoin,ethereum,solana")
@@ -59,6 +78,23 @@ NEWS_COUNTRY = os.environ.get("NEWS_COUNTRY", "au")
 NEWS_CATEGORY = os.environ.get("NEWS_CATEGORY", "technology")
 NEWS_PAGE_SIZE = int(os.environ.get("NEWS_PAGE_SIZE", "5"))
 ENABLE_APOD_IMAGE = os.environ.get("ENABLE_APOD_IMAGE", "1") == "1"
+
+
+# ─── DEV MODE ──────────────────────────────────────────────────────────────────
+# these get set from the command line in main() - see the docstring up top
+DEV_MODE = False
+DUMMY_MODE = False
+
+DEV_WINDOW_SIZE = (1280, 720)  # starting window size in dev mode
+DEV_MIN_SIZE = (1024, 720)     # slides + admin panel use fixed pixel positions, so don't let the window shrink below this
+RESIZE_SETTLE_SECONDS = 0.25   # wait for the user to stop dragging before re-laying out slides
+
+# built-in feeds that need a key: feed name -> key name in secrets.env
+KEYED_FEEDS = {
+    "weather": "OPENWEATHER_API_KEY",
+    "news": "NEWS_API_KEY",
+    "apod": "NASA_API_KEY",
+}
 
 
 # ─── PHOTO DISCOVERY ───────────────────────────────────────────────────────────
@@ -144,14 +180,29 @@ def load_image(path, target_w, target_h):
         return None
 
 
+# url -> surface (or None if it failed). cached so re-laying out slides after a resize
+# doesn't re-download the APOD image (or sit through an 8s timeout again if it failed)
+_remote_image_cache = {}
+
+
+def clear_remote_image_cache():
+    _remote_image_cache.clear()
+
+
 def load_remote_image(url):
+    if url in _remote_image_cache:
+        return _remote_image_cache[url]
+
     try:
         with urllib.request.urlopen(url, timeout=8) as response:
             raw = response.read()
-        return pygame.image.load(io.BytesIO(raw)).convert()
+        image = pygame.image.load(io.BytesIO(raw)).convert()
     except Exception as error:
         print(f"[PhotoFrame] Couldn't load remote image {url}: {error}")
-        return None
+        image = None
+
+    _remote_image_cache[url] = image
+    return image
 
 
 # ─── TEXT / UI HELPERS ─────────────────────────────────────────────────────────
@@ -210,39 +261,60 @@ def draw_card(surface, rect):
 
 
 # ─── API DATA ──────────────────────────────────────────────────────────────────
+def use_dummy(feed_name):
+    """Should this feed use dummy data instead of calling the real API?"""
+    if DUMMY_MODE:
+        return True
+
+    # dev mode only: fill in feeds whose key isn't set rather than just dropping the slide
+    key_name = KEYED_FEEDS.get(feed_name)
+    if DEV_MODE and key_name and not has_key(key_name):
+        print(f"[PhotoFrame] Dev mode: {key_name} not set - using dummy {feed_name} data")
+        return True
+
+    return False
+
+
 def fetch_api_data():
     settings = admin_panel.load_settings()
     api_data = {}
 
     if admin_panel.is_content_enabled(settings, "weather"):
-        weather = get_weather(WEATHER_CITY)
+        weather = dummy_data.weather(WEATHER_CITY) if use_dummy("weather") else get_weather(WEATHER_CITY)
         if weather:
             api_data["weather"] = weather
 
     if admin_panel.is_content_enabled(settings, "crypto"):
-        crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
+        if use_dummy("crypto"):
+            crypto = dummy_data.crypto(CRYPTO_COINS, CRYPTO_CURRENCY)
+        else:
+            crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
         if crypto:
             api_data["crypto"] = crypto
 
     if admin_panel.is_content_enabled(settings, "news"):
-        news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
+        if use_dummy("news"):
+            news = dummy_data.news(NEWS_PAGE_SIZE)
+        else:
+            news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
         if news:
             api_data["news"] = news
 
     if admin_panel.is_content_enabled(settings, "apod"):
-        apod = get_apod()
+        apod = dummy_data.apod() if use_dummy("apod") else get_apod()
         if apod:
             api_data["apod"] = apod
 
+    all_custom = dummy_data.custom_apis(load_custom_api_configs()) if use_dummy("custom") else get_custom_apis()
     custom_apis = [
-        item for item in get_custom_apis()
+        item for item in all_custom
         if admin_panel.is_content_enabled(settings, "custom", custom_name=item.get("name"))
     ]
     if custom_apis:
         api_data["custom"] = custom_apis
 
     if admin_panel.is_content_enabled(settings, "trivia"):
-        trivia = get_trivia()
+        trivia = dummy_data.trivia() if use_dummy("trivia") else get_trivia()
         if trivia:
             api_data["trivia"] = trivia
 
@@ -552,7 +624,7 @@ def build_trivia_answer_slide(screen_size, fonts, trivia_item):
     draw_trivia_content(surface, fonts, trivia_item, highlight_correct=True)
     return surface
 
-def build_api_slides(screen_size, fonts, api_data):
+def build_api_slides(screen_size, fonts, api_data, trivia_item=None):
     slides = []
 
     if api_data.get("weather"):
@@ -594,7 +666,9 @@ def build_api_slides(screen_size, fonts, api_data):
             )
 
     if api_data.get("trivia"):
-        trivia_item = random.choice(api_data["trivia"])
+        # normally picked once in gather_content() so a re-layout keeps the same question
+        if trivia_item is None:
+            trivia_item = random.choice(api_data["trivia"])
 
         slides.append(
             {
@@ -617,10 +691,23 @@ def build_api_slides(screen_size, fonts, api_data):
     return slides
 
 # ─── SLIDESHOW QUEUE ───────────────────────────────────────────────────────────
-def build_slide_queue(screen_w, screen_h, fonts):
+def gather_content():
+    """
+    The slow part: find photos + hit the APIs. Kept separate from building the
+    slides so a dev-window resize can re-lay everything out without re-fetching.
+    """
+    clear_remote_image_cache()  # fresh data = allow a fresh image download too
+
     photos = get_photos()
     api_data = fetch_api_data()
-    api_slides = build_api_slides((screen_w, screen_h), fonts, api_data)
+    trivia_item = random.choice(api_data["trivia"]) if api_data.get("trivia") else None
+
+    return {"photos": photos, "api_data": api_data, "trivia_item": trivia_item}
+
+
+def build_slide_queue(screen_w, screen_h, fonts, content):
+    photos = content["photos"]
+    api_slides = build_api_slides((screen_w, screen_h), fonts, content["api_data"], content["trivia_item"])
 
     queue = []
 
@@ -643,7 +730,20 @@ def build_slide_queue(screen_w, screen_h, fonts):
 
 
 # ─── MAIN DISPLAY LOOP ─────────────────────────────────────────────────────────
+def ensure_min_window_size():
+    """Dev mode: if the window's been dragged smaller than DEV_MIN_SIZE, snap it back up."""
+    screen = pygame.display.get_surface()
+    w, h = screen.get_size()
+    min_w, min_h = DEV_MIN_SIZE
+
+    if w < min_w or h < min_h:
+        screen = pygame.display.set_mode((max(w, min_w), max(h, min_h)), pygame.RESIZABLE)
+
+    return screen
+
+
 def run_slideshow(screen):
+    """Runs until quit. Returns "restart" / "exit" if Technician mode asked for that, otherwise None."""
     screen_w, screen_h = screen.get_size()
     fonts = make_fonts(screen_h)
 
@@ -658,11 +758,13 @@ def run_slideshow(screen):
         "CARD_BORDER": CARD_BORDER,
     }
 
-    slides = build_slide_queue(screen_w, screen_h, fonts)
+    content = gather_content()
+    slides = build_slide_queue(screen_w, screen_h, fonts, content)
     index = 0
     current_surface = None
     current_photo_path = None
     last_switch = time.time()
+    resize_pending_since = None  # dev mode: time of the most recent resize event
 
     admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
 
@@ -679,38 +781,74 @@ def run_slideshow(screen):
             last_switch = now
 
             if index == 0:
-                slides = build_slide_queue(screen_w, screen_h, fonts)
+                content = gather_content()
+                slides = build_slide_queue(screen_w, screen_h, fonts, content)
 
             current_surface = None
             current_photo_path = None
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return
+                # closing the window only counts in dev mode - on the Pi (e.g. Alt+F4)
+                # it's ignored, so the frame can't be closed without the technician PIN
+                if DEV_MODE:
+                    return None
+                continue
+
+            if event.type == pygame.VIDEORESIZE:
+                # dragging the window edge fires loads of these - just note it,
+                # the actual re-layout happens once things settle (below)
+                resize_pending_since = now
+                continue
 
             if event.type == pygame.KEYDOWN:
                 if event.key == admin_key:
-                    admin_panel.run_admin_panel(screen, fonts, theme_colors)
+                    action = admin_panel.run_admin_panel(screen, fonts, theme_colors, dev_mode=DEV_MODE)
+                    if action:
+                        return action  # restart / exit - main() carries it out once pygame is closed
+
                     admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
-                    slides = build_slide_queue(screen_w, screen_h, fonts)
+
+                    if DEV_MODE:
+                        # window might've been resized while the panel was open
+                        screen = ensure_min_window_size()
+                        screen_w, screen_h = screen.get_size()
+                        fonts = make_fonts(screen_h)
+
+                    content = gather_content()
+                    slides = build_slide_queue(screen_w, screen_h, fonts, content)
                     index = 0
                     last_switch = time.time()
                     current_surface = None
                     current_photo_path = None
                     continue
-                if event.key == pygame.K_ESCAPE:
-                    return
+                if event.key == pygame.K_ESCAPE and DEV_MODE:
+                    return None
                 if event.key in (pygame.K_SPACE, pygame.K_RIGHT):
                     index = (index + 1) % len(slides)
                     last_switch = now
                     current_surface = None
                     current_photo_path = None
                 if event.key == pygame.K_r:
-                    slides = build_slide_queue(screen_w, screen_h, fonts)
+                    content = gather_content()
+                    slides = build_slide_queue(screen_w, screen_h, fonts, content)
                     index = 0
                     last_switch = now
                     current_surface = None
                     current_photo_path = None
+
+        # dev mode: once the user stops dragging, re-lay out every slide at the new size
+        # using the content we already have - no new API calls
+        if resize_pending_since is not None and now - resize_pending_since >= RESIZE_SETTLE_SECONDS:
+            resize_pending_since = None
+            screen = ensure_min_window_size()
+            screen_w, screen_h = screen.get_size()
+            fonts = make_fonts(screen_h)
+            slides = build_slide_queue(screen_w, screen_h, fonts, content)
+            index = min(index, len(slides) - 1)
+            current_surface = None  # forces the current photo to re-crop at the new size
+            current_photo_path = None
+            print(f"[PhotoFrame] Window resized to {screen_w}x{screen_h} - slides re-laid out")
 
         slide = slides[index]
 
@@ -729,26 +867,64 @@ def run_slideshow(screen):
                 current_surface = slide["surface"]
                 current_photo_path = None
 
+        # mid-drag the window and the slide can be different sizes - clear the leftover edges
+        if current_surface.get_size() != screen.get_size():
+            screen.fill(BACKGROUND_COLOR)
+
         screen.blit(current_surface, (0, 0))
         pygame.display.flip()
         clock.tick(30)
 
 
 # ─── ENTRY POINT ───────────────────────────────────────────────────────────────
-def main():
-    pygame.init()
-    pygame.mouse.set_visible(True)
+def parse_args():
+    parser = argparse.ArgumentParser(description="ynotPi photo frame")
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="resizable window + visible mouse, dummy data for weather/news/APOD if their key isn't set",
+    )
+    parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="use dummy data for every API feed (no internet needed)",
+    )
+    return parser.parse_args()
 
-    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-    pygame.display.set_caption("ynotPi Photo Frame")
+
+def main():
+    global DEV_MODE, DUMMY_MODE
+
+    args = parse_args()
+    DEV_MODE = args.dev
+    DUMMY_MODE = args.dummy
+
+    pygame.init()
+
+    if DEV_MODE:
+        screen = pygame.display.set_mode(DEV_WINDOW_SIZE, pygame.RESIZABLE)
+        pygame.display.set_caption("ynotPi Photo Frame (dev)")
+        pygame.mouse.set_visible(True)
+    else:
+        # the normal Pi setup - unchanged
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        pygame.display.set_caption("ynotPi Photo Frame")
+        pygame.mouse.set_visible(False)
 
     screen_w, screen_h = screen.get_size()
-    print(f"[PhotoFrame] Running at {screen_w}x{screen_h}")
+    print(f"[PhotoFrame] Running at {screen_w}x{screen_h}{' (dev mode)' if DEV_MODE else ''}")
+    if DUMMY_MODE:
+        print("[PhotoFrame] Dummy mode - every API feed is using dummy data")
 
-    pygame.mouse.set_visible(False)
-    run_slideshow(screen)
+    action = run_slideshow(screen)
 
     pygame.quit()
+
+    if action == "restart":
+        technician.restart_app()
+    elif action == "exit":
+        technician.exit_to_desktop()
+
     sys.exit()
 
 

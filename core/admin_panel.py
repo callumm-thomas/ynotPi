@@ -3,7 +3,9 @@ ynotPi — core/admin_panel.py
 -----------------------------
 In-app admin overlay for the photo frame.
 
-Opened from the slideshow with a customisable hotkey (default F1). Lets you:
+Opened from the slideshow with a customisable hotkey (default F1), behind a PIN
+(see access.py). The client PIN opens Admin mode; the technician PIN opens the
+same plus a Technician tab (see technician.py). Lets you:
 - see every content type in a grid and flip it on/off
 - pick which photo sources are active (local folder / USB / network share)
 - add a new custom API entry, saved straight into config/apis.json
@@ -20,6 +22,8 @@ from pathlib import Path
 import pygame
 
 from core import api_manager
+from core import access
+from core import technician
 
 BASE_DIR = Path(__file__).parent.parent
 SETTINGS_PATH = BASE_DIR / "config" / "settings.json"
@@ -170,15 +174,29 @@ class TextField:
 
 
 # ─── MAIN PANEL ────────────────────────────────────────────────────────────────
-def run_admin_panel(screen, fonts, colors):
+def run_admin_panel(screen, fonts, colors, dev_mode=False):
     """
-    Blocking loop for the admin overlay. Runs its own event loop until the
-    user closes it (Esc, or clicking Close). Reads/writes settings.json and
-    apis.json directly. Returns nothing — the caller should reload settings
-    and rebuild its slide queue afterwards.
+    Blocking loop for the admin overlay. Asks for a PIN first, then runs its
+    own event loop until the user closes it (Esc, or clicking Close).
+    Reads/writes settings.json and apis.json directly.
+
+    Returns "restart" or "exit" if a Technician action needs the app to do
+    that, otherwise None. Either way the caller should reload settings and
+    rebuild its slide queue afterwards.
     """
+    level = access.prompt_for_pin(screen, fonts, colors)
+    if level is None:
+        return None  # cancelled or wrong PIN - straight back to the slideshow
+
+    screen = pygame.display.get_surface()  # in case the window was resized during the PIN screen
     settings = load_settings()
     screen_w, screen_h = screen.get_size()
+
+    is_technician = level == access.TECHNICIAN
+    tabs = TABS + (["Technician"] if is_technician else [])
+    technician_tab = technician.TechnicianTab(dev_mode) if is_technician else None
+    panel_title = "Technician Mode" if is_technician else "Admin Panel"
+    result = None
 
     active_tab = 0
     content_focus = 0
@@ -246,7 +264,7 @@ def run_admin_panel(screen, fonts, colors):
     while running:
         tab_rects = []
         tab_x = 40
-        for i, tab_name in enumerate(TABS):
+        for i, tab_name in enumerate(tabs):
             width = fonts["body"].size(tab_name)[0] + 40
             tab_rects.append((pygame.Rect(tab_x, 30, width, 48), i))
             tab_x += width + 12
@@ -254,8 +272,21 @@ def run_admin_panel(screen, fonts, colors):
         close_rect = pygame.Rect(screen_w - 150, 30, 110, 48)
 
         for event in pygame.event.get():
+            on_technician_tab = technician_tab is not None and tabs[active_tab] == "Technician"
+
+            # while typing a new PIN, the Technician tab gets every key (so Esc / arrows don't close or switch tabs)
+            if on_technician_tab and event.type == pygame.KEYDOWN and technician_tab.has_active_field():
+                technician_tab.handle_event(event, screen, fonts)
+                continue
+
             if event.type == pygame.QUIT:
                 running = False
+
+            elif event.type == pygame.VIDEORESIZE:
+                # dev mode window got resized - re-read the size so the layout follows it
+                # (photoframe.py snaps it back to the minimum size once the panel closes)
+                screen = pygame.display.get_surface()
+                screen_w, screen_h = screen.get_size()
 
             elif event.type == pygame.KEYDOWN:
                 if waiting_for_key:
@@ -284,9 +315,9 @@ def run_admin_panel(screen, fonts, colors):
                     running = False
                 elif event.key in (pygame.K_LEFT,) and active_tab > 0:
                     active_tab -= 1
-                elif event.key in (pygame.K_RIGHT,) and active_tab < len(TABS) - 1:
+                elif event.key in (pygame.K_RIGHT,) and active_tab < len(tabs) - 1:
                     active_tab += 1
-                elif TABS[active_tab] == "Content":
+                elif tabs[active_tab] == "Content":
                     items = content_grid_items()
                     if event.key == pygame.K_UP and content_focus - 3 >= 0:
                         content_focus -= 3
@@ -299,16 +330,21 @@ def run_admin_panel(screen, fonts, colors):
                         else:
                             settings["content"][key] = not is_content_enabled(settings, key)
                         save_settings(settings)
-                elif TABS[active_tab] == "Photo Sources":
+                elif tabs[active_tab] == "Photo Sources":
                     keys = list(SOURCE_LABELS)
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         key = keys[source_focus]
                         settings["sources"][key] = not is_source_enabled(settings, key)
                         save_settings(settings)
-                elif TABS[active_tab] == "Hotkey":
+                elif tabs[active_tab] == "Hotkey":
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         waiting_for_key = True
                         status_message = "Press any key to set the new hotkey..."
+                elif on_technician_tab:
+                    technician_tab.handle_event(event, screen, fonts)
+
+            elif event.type == pygame.MOUSEWHEEL and on_technician_tab:
+                technician_tab.handle_event(event, screen, fonts)
 
             elif event.type == pygame.TEXTINPUT:
                 for field in fields:
@@ -325,7 +361,7 @@ def run_admin_panel(screen, fonts, colors):
                         active_tab = i
                         break
 
-                if TABS[active_tab] == "Content":
+                if tabs[active_tab] == "Content":
                     items = content_grid_items()
                     columns = max(1, (screen_w - 120) // 300)
                     for idx, (key, _, custom_name) in enumerate(items):
@@ -340,14 +376,14 @@ def run_admin_panel(screen, fonts, colors):
                                 settings["content"][key] = not is_content_enabled(settings, key)
                             save_settings(settings)
 
-                elif TABS[active_tab] == "Photo Sources":
+                elif tabs[active_tab] == "Photo Sources":
                     for idx, key in enumerate(SOURCE_LABELS):
                         rect = pygame.Rect(60 + idx * 300, 150, 270, 150)
                         if rect.collidepoint(mouse_pos):
                             settings["sources"][key] = not is_source_enabled(settings, key)
                             save_settings(settings)
 
-                elif TABS[active_tab] == "Add API":
+                elif tabs[active_tab] == "Add API":
                     for field in fields:
                         field.active = field.rect.collidepoint(mouse_pos)
 
@@ -359,22 +395,28 @@ def run_admin_panel(screen, fonts, colors):
                     if submit_rect.collidepoint(mouse_pos):
                         submit_new_api()
 
-                elif TABS[active_tab] == "Hotkey":
+                elif tabs[active_tab] == "Hotkey":
                     change_rect = pygame.Rect(100, 220, 260, 50)
                     if change_rect.collidepoint(mouse_pos):
                         waiting_for_key = True
                         status_message = "Press any key to set the new hotkey..."
 
+                elif tabs[active_tab] == "Technician":
+                    action = technician_tab.handle_event(event, screen, fonts)
+                    if action:
+                        result = action
+                        running = False
+
         # ── draw ──
         screen.fill(colors["BACKGROUND_COLOR"])
 
-        _draw_text(screen, "Admin Panel", fonts["title"], colors["TEXT_COLOR"], (40, screen_h - 60))
+        _draw_text(screen, panel_title, fonts["title"], colors["TEXT_COLOR"], (40, screen_h - 60))
         _draw_button(screen, close_rect, "Close (Esc)", fonts["small"], colors)
 
         for rect, i in tab_rects:
-            _draw_button(screen, rect, TABS[i], fonts["body"], colors, active=(i == active_tab))
+            _draw_button(screen, rect, tabs[i], fonts["body"], colors, active=(i == active_tab))
 
-        if TABS[active_tab] == "Content":
+        if tabs[active_tab] == "Content":
             items = content_grid_items()
             columns = max(1, (screen_w - 120) // 300)
             for idx, (key, label, custom_name) in enumerate(items):
@@ -384,7 +426,7 @@ def run_admin_panel(screen, fonts, colors):
                 enabled = is_content_enabled(settings, key, custom_name)
                 _draw_toggle_tile(screen, rect, label, enabled, fonts["body"], fonts["small"], colors, focused=(idx == content_focus))
 
-        elif TABS[active_tab] == "Photo Sources":
+        elif tabs[active_tab] == "Photo Sources":
             for idx, key in enumerate(SOURCE_LABELS):
                 label, path_hint = SOURCE_LABELS[key]
                 rect = pygame.Rect(60 + idx * 300, 150, 270, 150)
@@ -392,7 +434,7 @@ def run_admin_panel(screen, fonts, colors):
                 _draw_toggle_tile(screen, rect, label, enabled, fonts["body"], fonts["small"], colors, focused=(idx == source_focus))
                 _draw_text(screen, path_hint, fonts["small"], colors["SUBTEXT_COLOR"], (rect.x, rect.bottom + 10))
 
-        elif TABS[active_tab] == "Add API":
+        elif tabs[active_tab] == "Add API":
             _draw_text(screen, "New Custom API", fonts["body"], colors["TEXT_COLOR"], (100, 170))
             for field in fields:
                 field.draw(screen, fonts["body"], fonts["small"], colors)
@@ -407,7 +449,7 @@ def run_admin_panel(screen, fonts, colors):
             if status_message:
                 _draw_text(screen, status_message, fonts["small"], colors["HIGHLIGHT_COLOR"], (100, 610))
 
-        elif TABS[active_tab] == "Hotkey":
+        elif tabs[active_tab] == "Hotkey":
             current = settings.get("admin_hotkey", "f1")
             _draw_text(screen, f"Current hotkey: {current.upper()}", fonts["body"], colors["TEXT_COLOR"], (100, 170))
             change_rect = pygame.Rect(100, 220, 260, 50)
@@ -417,5 +459,18 @@ def run_admin_panel(screen, fonts, colors):
             if status_message:
                 _draw_text(screen, status_message, fonts["small"], colors["HIGHLIGHT_COLOR"], (100, 300))
 
+        elif tabs[active_tab] == "Technician":
+            technician_tab.draw(screen, fonts, colors)
+
         pygame.display.flip()
+
+        # slow Technician actions (update, reboot) run here, after their "please wait" message is showing
+        if technician_tab is not None:
+            action = technician_tab.tick()
+            if action:
+                result = action
+                running = False
+
         clock.tick(30)
+
+    return result
