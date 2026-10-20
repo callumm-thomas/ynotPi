@@ -55,6 +55,9 @@ def _get_key(name):
         return None
     return value
 
+def has_key(name):
+    """True if this key is set in secrets.env. Silent, unlike _get_key()."""
+    return bool(_SECRETS.get(name, "").strip())
 
 # ─── LOAD CUSTOM API CONFIG ────────────────────────────────────────────────────
 def load_custom_api_configs():
