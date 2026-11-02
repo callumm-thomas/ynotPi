@@ -8,6 +8,7 @@ Opened from the slideshow with a customisable hotkey (default F1), behind a PIN
 same plus a Technician tab (see technician.py). Lets you:
 - see every content type in a grid and flip it on/off
 - pick which photo sources are active (local folder / USB / network share)
+- set company branding: brand colours + logo (see branding_tab.py)
 - add a new custom API entry, saved straight into config/apis.json
 - rebind the hotkey that opens this panel
 
@@ -23,6 +24,8 @@ import pygame
 
 from core import api_manager
 from core import access
+from core import branding
+from core import branding_tab
 from core import technician
 
 BASE_DIR = Path(__file__).parent.parent
@@ -40,6 +43,7 @@ DEFAULT_SETTINGS = {
         "trivia": True,
         "custom": {},
     },
+    "branding": dict(branding.DEFAULT_BRANDING),
 }
 
 CONTENT_LABELS = {
@@ -57,7 +61,7 @@ SOURCE_LABELS = {
     "network": ("Network Folder", "/mnt/photos"),
 }
 
-TABS = ["Content", "Photo Sources", "Add API", "Hotkey"]
+TABS = ["Content", "Photo Sources", "Branding", "Add API", "Hotkey"]
 
 
 def _deep_merge(defaults, loaded):
@@ -195,6 +199,11 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
     is_technician = level == access.TECHNICIAN
     tabs = TABS + (["Technician"] if is_technician else [])
     technician_tab = technician.TechnicianTab(dev_mode) if is_technician else None
+
+    # tabs that handle their own events + drawing (both have handle_event / has_active_field / draw)
+    special_tabs = {"Branding": branding_tab.BrandingTab(settings, save_settings, colors)}
+    if technician_tab:
+        special_tabs["Technician"] = technician_tab
     panel_title = "Technician Mode" if is_technician else "Admin Panel"
     result = None
 
@@ -262,21 +271,26 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
     clock = pygame.time.Clock()
 
     while running:
+        # with every tab showing, the bar can get wider than a small window - drop to the small font if so
+        close_rect = pygame.Rect(screen_w - 150, 30, 110, 48)
+        tab_font = fonts["body"]
+        if sum(tab_font.size(name)[0] + 52 for name in tabs) > close_rect.x - 50:
+            tab_font = fonts["small"]
+
         tab_rects = []
         tab_x = 40
         for i, tab_name in enumerate(tabs):
-            width = fonts["body"].size(tab_name)[0] + 40
+            width = tab_font.size(tab_name)[0] + 40
             tab_rects.append((pygame.Rect(tab_x, 30, width, 48), i))
             tab_x += width + 12
 
-        close_rect = pygame.Rect(screen_w - 150, 30, 110, 48)
-
         for event in pygame.event.get():
-            on_technician_tab = technician_tab is not None and tabs[active_tab] == "Technician"
+            special_tab = special_tabs.get(tabs[active_tab])
 
-            # while typing a new PIN, the Technician tab gets every key (so Esc / arrows don't close or switch tabs)
-            if on_technician_tab and event.type == pygame.KEYDOWN and technician_tab.has_active_field():
-                technician_tab.handle_event(event, screen, fonts)
+            # while typing (PIN, hex code) or picking a logo, that tab gets every key,
+            # so Esc / arrows don't close the panel or switch tabs
+            if special_tab and event.type == pygame.KEYDOWN and special_tab.has_active_field():
+                special_tab.handle_event(event, screen, fonts)
                 continue
 
             if event.type == pygame.QUIT:
@@ -340,11 +354,11 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         waiting_for_key = True
                         status_message = "Press any key to set the new hotkey..."
-                elif on_technician_tab:
-                    technician_tab.handle_event(event, screen, fonts)
+                elif special_tab:
+                    special_tab.handle_event(event, screen, fonts)
 
-            elif event.type == pygame.MOUSEWHEEL and on_technician_tab:
-                technician_tab.handle_event(event, screen, fonts)
+            elif event.type == pygame.MOUSEWHEEL and special_tab:
+                special_tab.handle_event(event, screen, fonts)
 
             elif event.type == pygame.TEXTINPUT:
                 for field in fields:
@@ -401,9 +415,9 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
                         waiting_for_key = True
                         status_message = "Press any key to set the new hotkey..."
 
-                elif tabs[active_tab] == "Technician":
-                    action = technician_tab.handle_event(event, screen, fonts)
-                    if action:
+                elif tabs[active_tab] in special_tabs:
+                    action = special_tabs[tabs[active_tab]].handle_event(event, screen, fonts)
+                    if action:  # only the Technician tab ever returns one (restart / exit)
                         result = action
                         running = False
 
@@ -414,7 +428,7 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
         _draw_button(screen, close_rect, "Close (Esc)", fonts["small"], colors)
 
         for rect, i in tab_rects:
-            _draw_button(screen, rect, tabs[i], fonts["body"], colors, active=(i == active_tab))
+            _draw_button(screen, rect, tabs[i], tab_font, colors, active=(i == active_tab))
 
         if tabs[active_tab] == "Content":
             items = content_grid_items()
@@ -459,8 +473,8 @@ def run_admin_panel(screen, fonts, colors, dev_mode=False):
             if status_message:
                 _draw_text(screen, status_message, fonts["small"], colors["HIGHLIGHT_COLOR"], (100, 300))
 
-        elif tabs[active_tab] == "Technician":
-            technician_tab.draw(screen, fonts, colors)
+        elif tabs[active_tab] in special_tabs:
+            special_tabs[tabs[active_tab]].draw(screen, fonts, colors)
 
         pygame.display.flip()
 

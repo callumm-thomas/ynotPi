@@ -51,20 +51,24 @@ from core.api_manager import (
     has_key, load_custom_api_configs,
 )
 from core import admin_panel
+from core import branding
 from core import dummy_data
 from core import technician
 
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 SLIDE_DURATION = 10
-BACKGROUND_COLOR = (18, 22, 28)
-TEXT_COLOR = (245, 245, 245)
-SUBTEXT_COLOR = (170, 176, 186)
-HIGHLIGHT_COLOR = (70, 130, 200)
-BUTTON_COLOR = (55, 55, 55)
-BUTTON_HOVER = (75, 75, 75)
-CARD_COLOR = (30, 35, 43)
-CARD_BORDER = (55, 63, 75)
+# colours start as the default ynotPi look, then apply_branding() swaps in the
+# company's colours (if set) - see branding.py for how they're worked out
+BACKGROUND_COLOR = branding.DEFAULT_PALETTE["BACKGROUND_COLOR"]
+TEXT_COLOR = branding.DEFAULT_PALETTE["TEXT_COLOR"]
+SUBTEXT_COLOR = branding.DEFAULT_PALETTE["SUBTEXT_COLOR"]
+HIGHLIGHT_COLOR = branding.DEFAULT_PALETTE["HIGHLIGHT_COLOR"]
+BUTTON_COLOR = branding.DEFAULT_PALETTE["BUTTON_COLOR"]
+BUTTON_HOVER = branding.DEFAULT_PALETTE["BUTTON_HOVER"]
+CARD_COLOR = branding.DEFAULT_PALETTE["CARD_COLOR"]
+CARD_BORDER = branding.DEFAULT_PALETTE["CARD_BORDER"]
+ANSWER_BOX_COLOR = branding.DEFAULT_PALETTE["ANSWER_BOX_COLOR"]
 
 NETWORK_SHARE_MOUNT = "/mnt/photos"
 USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
@@ -95,6 +99,32 @@ KEYED_FEEDS = {
     "news": "NEWS_API_KEY",
     "apod": "NASA_API_KEY",
 }
+
+
+# ─── BRANDING ──────────────────────────────────────────────────────────────────
+def apply_branding():
+    """
+    Load the branding settings and switch every slide colour over to them.
+    Returns (branding settings, colour palette dict). Called at startup and
+    whenever the admin panel closes.
+    """
+    global BACKGROUND_COLOR, TEXT_COLOR, SUBTEXT_COLOR, HIGHLIGHT_COLOR
+    global BUTTON_COLOR, BUTTON_HOVER, CARD_COLOR, CARD_BORDER, ANSWER_BOX_COLOR
+
+    brand = branding.get_branding(admin_panel.load_settings())
+    palette = branding.palette_for(brand)
+
+    BACKGROUND_COLOR = palette["BACKGROUND_COLOR"]
+    TEXT_COLOR = palette["TEXT_COLOR"]
+    SUBTEXT_COLOR = palette["SUBTEXT_COLOR"]
+    HIGHLIGHT_COLOR = palette["HIGHLIGHT_COLOR"]
+    BUTTON_COLOR = palette["BUTTON_COLOR"]
+    BUTTON_HOVER = palette["BUTTON_HOVER"]
+    CARD_COLOR = palette["CARD_COLOR"]
+    CARD_BORDER = palette["CARD_BORDER"]
+    ANSWER_BOX_COLOR = palette["ANSWER_BOX_COLOR"]
+
+    return brand, palette
 
 
 # ─── PHOTO DISCOVERY ───────────────────────────────────────────────────────────
@@ -255,9 +285,16 @@ def draw_wrapped_text(surface, text, font, color, rect, line_gap=8, max_lines=No
     return y
 
 
+def card_rect(screen_w, screen_h):
+    """The big rounded card every API slide sits in. Leaves room underneath for the logo."""
+    return pygame.Rect(60, 130, screen_w - 120, screen_h - 130 - branding.card_bottom_margin(screen_h))
+
+
 def draw_card(surface, rect):
     pygame.draw.rect(surface, CARD_COLOR, rect, border_radius=18)
     pygame.draw.rect(surface, CARD_BORDER, rect, width=2, border_radius=18)
+    # small accent-coloured tab on the card - where the brand accent shows up on every slide
+    pygame.draw.rect(surface, HIGHLIGHT_COLOR, pygame.Rect(rect.x + 30, rect.y + 14, 70, 6), border_radius=3)
 
 
 # ─── API DATA ──────────────────────────────────────────────────────────────────
@@ -333,7 +370,7 @@ def build_weather_slide(screen_size, fonts, weather):
     title = fonts["title"].render("Weather", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     city = fonts["title"].render(weather.get("city", WEATHER_CITY), True, TEXT_COLOR)
@@ -349,7 +386,7 @@ def build_weather_slide(screen_size, fonts, weather):
     surface.blit(humidity, (100, 490))
 
     footer = fonts["small"].render(f"Source: OpenWeather • {WEATHER_CITY}", True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
@@ -362,7 +399,7 @@ def build_crypto_slide(screen_size, fonts, crypto):
     title = fonts["title"].render("Crypto", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     y = 180
@@ -386,11 +423,11 @@ def build_crypto_slide(screen_size, fonts, crypto):
         surface.blit(change_text, (screen_w // 2, y + 42))
         y += 110
 
-        if y > screen_h - 180:
+        if y > card.bottom - 90:
             break
 
     footer = fonts["small"].render("Source: CoinGecko", True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
@@ -403,7 +440,7 @@ def build_news_slide(screen_size, fonts, news_items):
     title = fonts["title"].render("News", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     y = 175
@@ -429,11 +466,11 @@ def build_news_slide(screen_size, fonts, news_items):
         surface.blit(meta_render, (140, end_y + 4))
 
         y += 105
-        if y > screen_h - 180:
+        if y > card.bottom - 90:
             break
 
     footer = fonts["small"].render(f"Source: News API • {NEWS_COUNTRY.upper()} / {NEWS_CATEGORY}", True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
@@ -446,7 +483,7 @@ def build_apod_slide(screen_size, fonts, apod):
     title = fonts["title"].render("NASA APOD", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     text_x = 100
@@ -474,7 +511,7 @@ def build_apod_slide(screen_size, fonts, apod):
     draw_wrapped_text(surface, apod.get("explanation", ""), fonts["small"], TEXT_COLOR, explanation_rect, line_gap=5, max_lines=10)
 
     footer = fonts["small"].render("Source: NASA APOD", True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
@@ -505,7 +542,7 @@ def build_custom_api_slide(screen_size, fonts, custom_api):
     title = fonts["title"].render(custom_api.get("name", "Custom API"), True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     rows = flatten_custom_data(custom_api.get("data", {}))[:10]
@@ -527,11 +564,11 @@ def build_custom_api_slide(screen_size, fonts, custom_api):
         )
 
         y += 85
-        if y > screen_h - 170:
+        if y > card.bottom - 80:
             break
 
     footer = fonts["small"].render("Source: custom API", True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
@@ -542,7 +579,7 @@ def draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False):
     title = fonts["title"].render("Trivia", True, TEXT_COLOR)
     surface.blit(title, (60, 40))
 
-    card = pygame.Rect(60, 130, screen_w - 120, screen_h - 220)
+    card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
     question = html.unescape(trivia_item.get("question", ""))
@@ -574,7 +611,7 @@ def draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False):
 
         is_correct = answer == correct
 
-        box_color = (45, 50, 60)
+        box_color = ANSWER_BOX_COLOR
         border_color = None
 
         if highlight_correct and is_correct:
@@ -606,7 +643,7 @@ def draw_trivia_content(surface, fonts, trivia_item, highlight_correct=False):
         footer_text += " • Correct answer shown"
 
     footer = fonts["small"].render(footer_text, True, SUBTEXT_COLOR)
-    surface.blit(footer, (100, screen_h - 120))
+    surface.blit(footer, (100, card.bottom - 30))
 
 
 def build_trivia_question_slide(screen_size, fonts, trivia_item):
@@ -747,16 +784,8 @@ def run_slideshow(screen):
     screen_w, screen_h = screen.get_size()
     fonts = make_fonts(screen_h)
 
-    theme_colors = {
-        "BACKGROUND_COLOR": BACKGROUND_COLOR,
-        "TEXT_COLOR": TEXT_COLOR,
-        "SUBTEXT_COLOR": SUBTEXT_COLOR,
-        "HIGHLIGHT_COLOR": HIGHLIGHT_COLOR,
-        "BUTTON_COLOR": BUTTON_COLOR,
-        "BUTTON_HOVER": BUTTON_HOVER,
-        "CARD_COLOR": CARD_COLOR,
-        "CARD_BORDER": CARD_BORDER,
-    }
+    brand, palette = apply_branding()
+    theme_colors = dict(palette)  # the admin panel uses the brand colours too
 
     content = gather_content()
     slides = build_slide_queue(screen_w, screen_h, fonts, content)
@@ -808,6 +837,8 @@ def run_slideshow(screen):
                         return action  # restart / exit - main() carries it out once pygame is closed
 
                     admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
+                    brand, palette = apply_branding()  # colours / logo may have changed in the panel
+                    theme_colors = dict(palette)
 
                     if DEV_MODE:
                         # window might've been resized while the panel was open
@@ -872,6 +903,7 @@ def run_slideshow(screen):
             screen.fill(BACKGROUND_COLOR)
 
         screen.blit(current_surface, (0, 0))
+        branding.draw_logo(screen, brand, is_photo=(slide["kind"] == "photo"))
         pygame.display.flip()
         clock.tick(30)
 
