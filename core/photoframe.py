@@ -156,10 +156,11 @@ def get_photos():
 def crop_to_fill(image, target_w, target_h):
     img_w, img_h = image.get_size()
     scale = max(target_w / img_w, target_h / img_h)
-    new_w = int(img_w * scale)
-    new_h = int(img_h * scale)
+    # round properly, and never let it come out smaller than the screen -
+    # int() rounds down, so some photos ended up 1px short and the crop failed
+    new_w = max(target_w, round(img_w * scale))
+    new_h = max(target_h, round(img_h * scale))
     scaled = pygame.transform.smoothscale(image, (new_w, new_h))
-
     x = (new_w - target_w) // 2
     y = (new_h - target_h) // 2
     cropped = scaled.subsurface(pygame.Rect(x, y, target_w, target_h))
