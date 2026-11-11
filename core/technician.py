@@ -9,12 +9,14 @@ Pages:
 - Log    : recent messages from logs/ynotpi.log
 - Power  : update now, restart app, reboot Pi, exit to desktop
 
+Drawn with the shared toolkit in ui.py, so keyboard + mouse work like every other tab.
+
 Reboot + exit-to-desktop need root for one command each. install.sh adds a
 narrow rule (/etc/sudoers.d/ynotpi) allowing exactly those commands and nothing
 else. They're checked before running, with a clear message if the rule is missing.
 
 Restart / exit are handed back to photoframe.py to carry out (it has to close
-pygame first), which is why handle_event() and tick() can return an action.
+pygame first), which is why handle_action() and tick() can return an action.
 """
 
 import os
@@ -27,7 +29,7 @@ from pathlib import Path
 
 import pygame
 
-from core import access, logbook
+from core import access, logbook, ui
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SERVICE_NAME = "ynotpi.service"
@@ -45,11 +47,6 @@ POWER_ACTIONS = [
     ("reboot", "Reboot Pi", "Restart the whole Raspberry Pi"),
     ("exit", "Exit to desktop", "Close the photo frame and leave it closed"),
 ]
-
-ERROR_COLOR = (230, 120, 110)
-OK_COLOR = (110, 210, 130)
-WARN_COLOR = (230, 180, 90)
-
 
 # ─── SYSTEM HELPERS ────────────────────────────────────────────────────────────
 def _run(cmd, timeout=5):
@@ -184,47 +181,32 @@ def exit_to_desktop():
     sys.exit(0)
 
 
-# ─── SMALL DRAW HELPERS ────────────────────────────────────────────────────────
-def _text(surface, text, font, color, pos):
-    surface.blit(font.render(text, True, color), pos)
-
-
-def _button(surface, rect, label, font, colors, active=False, highlight=False):
-    bg = colors["BUTTON_HOVER"] if active else colors["BUTTON_COLOR"]
-    pygame.draw.rect(surface, bg, rect, border_radius=10)
-    if active or highlight:
-        pygame.draw.rect(surface, colors["HIGHLIGHT_COLOR"], rect, width=2, border_radius=10)
-    rendered = font.render(label, True, colors["TEXT_COLOR"])
-    surface.blit(rendered, rendered.get_rect(center=rect.center))
-
-
 # ─── THE TAB ───────────────────────────────────────────────────────────────────
-class TechnicianTab:
-    def __init__(self, dev_mode=False):
-        self.dev_mode = dev_mode
+class TechnicianTab(ui.Tab):
+    name = "Technician"
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.dev_mode = ctx.dev_mode
         self.page = "System"
         self.info = None
         self.log_lines = []
         self.log_scroll = 0  # how many lines up from the newest
-        self.status = ""
-        self.status_ok = True
-        self.confirming = None  # power action waiting for its second click
+        self.log_visible = 1
+        self.confirming = None  # power action waiting for its second press
         self.pending = None     # slow action to run once the "please wait" message has been drawn
-        self.pin_text = {access.CLIENT: "", access.TECHNICIAN: ""}
-        self.active_pin = None
+        self.pin_form = {access.CLIENT: "", access.TECHNICIAN: ""}
 
-    def has_active_field(self):
-        return self.active_pin is not None
-
-    def _set_status(self, text, ok=True):
-        self.status = text
-        self.status_ok = ok
+    @property
+    def hint(self):
+        if self.page == "Log":
+            return "Up/Down: scroll the log    Esc: back"
+        return "Arrows: move    Enter: select    Esc: back"
 
     def _open_page(self, name):
         self.page = name
         self.confirming = None
-        self.active_pin = None
-        self._set_status("")
+        self.say("")
 
         if name == "System":
             self.info = system_info()
@@ -232,117 +214,78 @@ class TechnicianTab:
             self.log_lines = logbook.recent_lines()
             self.log_scroll = 0
 
-    # ── layout (worked out every frame so it follows window resizes) ──
-    def _page_rects(self, fonts):
-        rects = []
-        x = 60
-        for name in SUB_PAGES:
-            width = fonts["small"].size(name)[0] + 36
-            rects.append((pygame.Rect(x, 96, width, 38), name))
-            x += width + 10
-        return rects
-
-    @staticmethod
-    def _refresh_rect(screen_w):
-        return pygame.Rect(screen_w - 200, 96, 140, 38)
-
-    @staticmethod
-    def _pin_rects(role_index):
-        y = 170 + role_index * 170
-        return pygame.Rect(60, y + 70, 200, 50), pygame.Rect(280, y + 70, 160, 50)
-
-    @staticmethod
-    def _power_rect(index):
-        return pygame.Rect(60, 170 + index * 80, 240, 56)
-
-    def _log_rect(self, screen_w, screen_h):
-        return pygame.Rect(60, 150, screen_w - 120, screen_h - 150 - 160)  # leaves room for the hint + status line
+    def opened(self, ui_):
+        self.confirming = None
 
     # ── events ──
-    def handle_event(self, event, screen, fonts):
+    def handle_raw(self, event, ui_):
+        if event.type == pygame.MOUSEWHEEL:
+            self.handle_wheel(event)
+            return False  # let the toolkit see it too (it ignores it - there are no lists on this tab)
+
+        # on the Log page, Up/Down scroll the log while the focus is on the log box
+        if self.page != "Log" or ui_.focus != "log:box":
+            return False
+        if event.type == pygame.KEYDOWN and event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_PAGEUP, pygame.K_PAGEDOWN):
+            step = {pygame.K_UP: 3, pygame.K_DOWN: -3,
+                    pygame.K_PAGEUP: self.log_visible, pygame.K_PAGEDOWN: -self.log_visible}[event.key]
+            if event.key == pygame.K_DOWN and self.log_scroll == 0:
+                return False  # already at the newest line - let Down move on as normal
+            self._scroll_log(step)
+            return True
+        return False
+
+    def handle_action(self, action, ui_):
         """Returns "restart" / "exit" if the app needs to do that, otherwise None."""
-        screen_w, screen_h = screen.get_size()
+        kind, item_id = action[0], str(action[1])
 
-        if event.type == pygame.KEYDOWN:
-            if self.active_pin:
-                if event.key == pygame.K_ESCAPE:
-                    self.active_pin = None
-                elif event.key == pygame.K_RETURN:
-                    self._save_pin(self.active_pin)
-                elif event.key == pygame.K_BACKSPACE:
-                    self.pin_text[self.active_pin] = self.pin_text[self.active_pin][:-1]
-                elif event.unicode and event.unicode.isdigit() and len(self.pin_text[self.active_pin]) < access.PIN_LENGTH:
-                    self.pin_text[self.active_pin] += event.unicode
-                return None
+        if not (kind == "activate" and item_id.startswith("power:")):
+            self.confirming = None
 
-            if self.page == "Log":
-                if event.key == pygame.K_UP:
-                    self._scroll_log(3, screen_h, fonts)
-                elif event.key == pygame.K_DOWN:
-                    self._scroll_log(-3, screen_h, fonts)
+        if kind == "commit" and item_id.startswith("pin:field:"):
+            self._save_pin(item_id.rsplit(":", 1)[1])
+            return None
+        if kind != "activate":
             return None
 
-        if event.type == pygame.MOUSEWHEEL and self.page == "Log":
-            self._scroll_log(event.y * 3, screen_h, fonts)
-            return None
-
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            pos = event.pos
-
-            for rect, name in self._page_rects(fonts):
-                if rect.collidepoint(pos):
-                    self._open_page(name)
-                    return None
-
-            if self.page in ("System", "Log") and self._refresh_rect(screen_w).collidepoint(pos):
-                self._open_page(self.page)
-                return None
-
-            if self.page == "PINs":
-                self.active_pin = None
-                for i, role in enumerate((access.CLIENT, access.TECHNICIAN)):
-                    field_rect, save_rect = self._pin_rects(i)
-                    if field_rect.collidepoint(pos):
-                        self.active_pin = role
-                    elif save_rect.collidepoint(pos):
-                        self._save_pin(role)
-
-            elif self.page == "Power":
-                for i, (action, label, _) in enumerate(POWER_ACTIONS):
-                    if self._power_rect(i).collidepoint(pos):
-                        return self._power_clicked(action, label)
-
+        if item_id.startswith("page:"):
+            self._open_page(item_id.split(":", 1)[1])
+        elif item_id == "refresh":
+            self._open_page(self.page)
+        elif item_id.startswith("pin:save:"):
+            self._save_pin(item_id.rsplit(":", 1)[1])
+        elif item_id.startswith("power:"):
+            action_name = item_id.split(":", 1)[1]
+            label = next(label for name, label, _ in POWER_ACTIONS if name == action_name)
+            return self._power_clicked(action_name, label)
         return None
 
-    def _scroll_log(self, amount, screen_h, fonts):
-        visible = max(1, self._log_rect(0, screen_h).height // (fonts["small"].get_height() + 4))
-        max_scroll = max(0, len(self.log_lines) - visible)
+    def _scroll_log(self, amount):
+        max_scroll = max(0, len(self.log_lines) - self.log_visible)
         self.log_scroll = max(0, min(max_scroll, self.log_scroll + amount))
 
     def _save_pin(self, role):
-        ok, message = access.set_pin(role, self.pin_text[role])
-        self._set_status(message, ok)
-        if ok:
-            self.pin_text[role] = ""
-            self.active_pin = None
+        ok, message = access.set_pin(role, self.pin_form[role])
+        self.say(message, ok)
+        self.pin_form[role] = ""  # cleared either way - a PIN never sits on screen
 
     def _power_clicked(self, action, label):
         if action == "update":
             if self.dev_mode:
-                self._set_status("Update is off in dev mode — it would pull into your working copy. Use git.", False)
+                self.say("Update is off in dev mode — it would pull into your working copy. Use git.", False)
                 return None
             self.pending = "update"
-            self._set_status("Checking GitHub for updates...")
+            self.say("Checking GitHub for updates...")
             return None
 
         if action == "reboot" and (self.dev_mode or not is_linux()):
-            self._set_status("Not available on this computer.", False)
+            self.say("Not available on this computer.", False)
             return None
 
-        # everything below needs a second click, so a stray click can't take the frame down
+        # everything below needs a second press, so a stray click can't take the frame down
         if self.confirming != action:
             self.confirming = action
-            self._set_status(f"Click '{label}' again to confirm.")
+            self.say(f"Press '{label}' again to confirm.")
             return None
         self.confirming = None
 
@@ -351,12 +294,12 @@ class TechnicianTab:
 
         if action == "reboot":
             self.pending = "reboot"
-            self._set_status("Rebooting...")
+            self.say("Rebooting...")
             return None
 
         if action == "exit":
             if running_under_systemd() and not can_sudo(STOP_SERVICE_CMD):
-                self._set_status("Exit permission isn't set up on this Pi — re-run install.sh.", False)
+                self.say("Exit permission isn't set up on this Pi — re-run install.sh.", False)
                 return None
             return "exit"
 
@@ -368,119 +311,123 @@ class TechnicianTab:
 
         if action == "update":
             ok, changed, message = update_code()
-            self._set_status(message, ok)
+            self.say(message, ok)
             if changed:
                 return "restart"
 
         elif action == "reboot":
             ok, message = reboot()
-            self._set_status(message, ok)
+            self.say(message, ok)
 
         return None
 
     # ── drawing ──
-    def draw(self, screen, fonts, colors):
-        screen_w, screen_h = screen.get_size()
-
-        for rect, name in self._page_rects(fonts):
-            _button(screen, rect, name, fonts["small"], colors, active=(name == self.page))
+    def draw(self, ui_, area):
+        x = area.x
+        for name in SUB_PAGES:
+            width = ui_.button_w(name, "small")
+            ui_.button(f"page:{name}", pygame.Rect(x, area.y, width, ui_.h_small), name, font="small", active=(name == self.page))
+            x += width + 6
 
         if self.page in ("System", "Log"):
-            _button(screen, self._refresh_rect(screen_w), "Refresh", fonts["small"], colors)
+            width = ui_.button_w("Refresh", "small")
+            ui_.button("refresh", pygame.Rect(area.right - width, area.y, width, ui_.h_small), "Refresh", font="small")
 
+        body = pygame.Rect(area.x, area.y + ui_.h_small + ui_.u, area.width, area.height - ui_.h_small - ui_.u)
         if self.page == "System":
-            self._draw_system(screen, fonts, colors)
+            self._draw_system(ui_, body)
         elif self.page == "PINs":
-            self._draw_pins(screen, fonts, colors)
+            self._draw_pins(ui_, body)
         elif self.page == "Log":
-            self._draw_log(screen, fonts, colors)
+            self._draw_log(ui_, body)
         elif self.page == "Power":
-            self._draw_power(screen, fonts, colors)
+            self._draw_power(ui_, body)
 
-        if self.status:
-            color = colors["HIGHLIGHT_COLOR"] if self.status_ok else ERROR_COLOR
-            _text(screen, self.status, fonts["body"], color, (60, screen_h - 115))
-
-    def _draw_system(self, screen, fonts, colors):
+    def _draw_system(self, ui_, rect):
         if self.info is None:
             self.info = system_info()
 
-        y = 170
-        row_h = fonts["body"].get_height() + 18
+        label_w = max(ui_.fonts["small"].size(label)[0] for label, _ in self.info) + 2 * ui_.pad
+        row_h = ui_.fonts["body"].get_height() + max(4, ui_.pad // 2)
+        y = rect.y
         for label, value in self.info:
-            _text(screen, label, fonts["small"], colors["SUBTEXT_COLOR"], (60, y + 4))
-            _text(screen, str(value), fonts["body"], colors["TEXT_COLOR"], (260, y))
+            if y + row_h > rect.bottom:
+                break
+            ui_.text(label, (rect.x, y + 4))
+            ui_.text(str(value), (rect.x + label_w, y), "body", "TEXT_COLOR", max_w=rect.width - label_w)
             y += row_h
 
-        if self.dev_mode:
-            _text(screen, "Dev mode — running on this computer, not the Pi.", fonts["small"], WARN_COLOR, (60, y + 10))
+        if self.dev_mode and y + ui_.u <= rect.bottom:
+            ui_.text("Dev mode — running on this computer, not the Pi.", (rect.x, y + 6), color=ui.WARN_COLOR)
 
-    def _draw_pins(self, screen, fonts, colors):
+    def _draw_pins(self, ui_, rect):
         rows = [
             (access.CLIENT, "Client PIN — opens Admin mode"),
             (access.TECHNICIAN, "Technician PIN — opens Admin + Technician mode"),
         ]
+        body_h = ui_.fonts["body"].get_height()
+        y = rect.y
 
-        for i, (role, title) in enumerate(rows):
-            y = 170 + i * 170
-            field_rect, save_rect = self._pin_rects(i)
-
-            _text(screen, title, fonts["body"], colors["TEXT_COLOR"], (60, y))
+        for role, title in rows:
+            ui_.text(title, (rect.x, y), "body", "TEXT_COLOR", max_w=rect.width)
+            y += body_h + 4
             if access.is_using_preset(role):
-                _text(screen, "Still using the preset PIN — change it before handing the frame over.", fonts["small"], WARN_COLOR, (60, y + 36))
+                ui_.text("Still using the preset PIN — change it before handing the frame over.", (rect.x, y),
+                         color=ui.WARN_COLOR, max_w=rect.width)
             else:
-                _text(screen, "Custom PIN set.", fonts["small"], OK_COLOR, (60, y + 36))
+                ui_.text("Custom PIN set.", (rect.x, y), color=ui.OK_COLOR)
+            y += ui_.u + ui_.pad
 
-            active = self.active_pin == role
-            pygame.draw.rect(screen, colors["CARD_COLOR"], field_rect, border_radius=8)
-            pygame.draw.rect(screen, colors["HIGHLIGHT_COLOR"] if active else colors["CARD_BORDER"], field_rect, width=2, border_radius=8)
+            field_w = ui_.fonts["body"].size("0000")[0] + 8 * ui_.pad
+            ui_.text_input(f"pin:field:{role}", pygame.Rect(rect.x, y, field_w, ui_.h_body), self.pin_form, role,
+                           placeholder="New PIN", allowed=set("0123456789"), max_len=access.PIN_LENGTH, dots=True)
+            ui_.button(f"pin:save:{role}", pygame.Rect(rect.x + field_w + ui_.pad, y, ui_.button_w("Save"), ui_.h_body), "Save")
+            y += ui_.h_body + 2 * ui_.u
 
-            typed = self.pin_text[role]
-            if typed or active:
-                shown = "•  " * len(typed) + ("|" if active and int(pygame.time.get_ticks() / 500) % 2 == 0 else "")
-                _text(screen, shown.strip(), fonts["body"], colors["TEXT_COLOR"], (field_rect.x + 14, field_rect.y + 10))
-            else:
-                _text(screen, "New PIN", fonts["small"], colors["SUBTEXT_COLOR"], (field_rect.x + 14, field_rect.y + 14))
+        ui_.text("Forgotten the technician PIN? Run scripts/reset_pins.sh on the Pi over SSH.",
+                 (rect.x, y), max_w=rect.width)
 
-            _button(screen, save_rect, "Save", fonts["body"], colors)
+    def _draw_log(self, ui_, rect):
+        colors = ui_.colors
+        box = pygame.Rect(rect.x, rect.y, rect.width, rect.height - ui_.u - 8)
+        state = ui_.register("log:box", box, kind="row")
+        pygame.draw.rect(ui_.screen, colors["CARD_COLOR"], box, border_radius=10)
+        pygame.draw.rect(ui_.screen, colors["CARD_BORDER"], box, width=1, border_radius=10)
 
-        _text(
-            screen,
-            "Forgotten the technician PIN? Run scripts/reset_pins.sh on the Pi over SSH.",
-            fonts["small"],
-            colors["SUBTEXT_COLOR"],
-            (60, 170 + 2 * 170),
-        )
-
-    def _draw_log(self, screen, fonts, colors):
-        screen_w, screen_h = screen.get_size()
-        box = self._log_rect(screen_w, screen_h)
-        pygame.draw.rect(screen, colors["CARD_COLOR"], box, border_radius=10)
-        pygame.draw.rect(screen, colors["CARD_BORDER"], box, width=1, border_radius=10)
-
-        font = fonts["small"]
+        font = ui_.fonts["small"]
         line_h = font.get_height() + 4
-        visible = max(1, (box.height - 20) // line_h)
-        max_chars = max(10, (box.width - 30) // max(1, font.size("0")[0]))  # rough cut-off, cheap every frame
+        self.log_visible = max(1, (box.height - 20) // line_h)
+        self._scroll_log(0)  # keeps the scroll in range if the window changed size
 
         end = len(self.log_lines) - self.log_scroll
-        start = max(0, end - visible)
+        start = max(0, end - self.log_visible)
 
         y = box.y + 10
         for line in self.log_lines[start:end]:
             lowered = line.lower()
             is_problem = any(word in lowered for word in ("error", "failed", "couldn't", "traceback"))
-            text = line if len(line) <= max_chars else line[: max_chars - 3] + "..."
-            _text(screen, text, font, ERROR_COLOR if is_problem else colors["TEXT_COLOR"], (box.x + 15, y))
+            ui_.text(line, (box.x + 15, y), color=ui.ERROR_COLOR if is_problem else "TEXT_COLOR", max_w=box.width - 30)
             y += line_h
 
-        hint = "Newest at the bottom  •  scroll with the mouse wheel or Up/Down"
+        hint = "Newest at the bottom  •  scroll with the mouse wheel, or select the log and use Up/Down"
         if self.log_scroll:
             hint += f"  •  {self.log_scroll} line(s) up"
-        _text(screen, hint, font, colors["SUBTEXT_COLOR"], (box.x, box.bottom + 8))
+        ui_.text(hint, (box.x, box.bottom + 6), max_w=box.width)
 
-    def _draw_power(self, screen, fonts, colors):
-        for i, (action, label, description) in enumerate(POWER_ACTIONS):
-            rect = self._power_rect(i)
-            _button(screen, rect, label, fonts["body"], colors, highlight=(self.confirming == action))
-            _text(screen, description, fonts["small"], colors["SUBTEXT_COLOR"], (rect.right + 30, rect.y + 16))
+        # mouse wheel over the log scrolls it (the toolkit's wheel handling is for lists)
+        self._log_box = box
+
+    def handle_wheel(self, event):
+        box = getattr(self, "_log_box", None)
+        if self.page == "Log" and box is not None and box.collidepoint(pygame.mouse.get_pos()):
+            self._scroll_log(event.y * 3)
+
+    def _draw_power(self, ui_, rect):
+        width = max(ui_.button_w(label) for _, label, _ in POWER_ACTIONS)
+        y = rect.y
+        for action, label, description in POWER_ACTIONS:
+            button = pygame.Rect(rect.x, y, width, ui_.h_body)
+            ui_.button(f"power:{action}", button, label, warn=(self.confirming == action))
+            ui_.text(description, (button.right + 2 * ui_.pad, y + (ui_.h_body - ui_.u) // 2),
+                     max_w=rect.right - button.right - 2 * ui_.pad)
+            y += ui_.h_body + ui_.pad

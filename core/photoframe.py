@@ -17,6 +17,7 @@ Keys:
 - esc = quit (dev mode only - on the Pi, quitting goes through Technician mode > Power)
 - r = rebuild queue + refresh API data
 - admin hotkey (default F1, customisable in the admin panel) = open admin panel (asks for a PIN)
+  The admin panel works with the keyboard or a mouse - see admin_panel.py.
 
 Dev mode (for testing on a laptop/desktop instead of the Pi):
 - python core/photoframe.py --dev          -> resizable window, mouse visible,
@@ -53,6 +54,8 @@ from core.api_manager import (
 from core import admin_panel
 from core import branding
 from core import dummy_data
+from core import photos as photo_sources
+from core import settings as settings_store
 from core import technician
 
 
@@ -70,16 +73,12 @@ CARD_COLOR = branding.DEFAULT_PALETTE["CARD_COLOR"]
 CARD_BORDER = branding.DEFAULT_PALETTE["CARD_BORDER"]
 ANSWER_BOX_COLOR = branding.DEFAULT_PALETTE["ANSWER_BOX_COLOR"]
 
-NETWORK_SHARE_MOUNT = "/mnt/photos"
-USB_BASE_PATHS = ["/media/pi", f"/media/{os.environ.get('USER', 'pi')}"]
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".webp"}
-LOCAL_PHOTO_PATH = str(BASE_DIR / "assets" / "photos")  # anchored to the repo, not whatever folder we got launched from
+# where photos are found lives in photos.py (the admin panel's Photo Sources tab uses it too)
 
-WEATHER_CITY = os.environ.get("WEATHER_CITY", "Sydney")
-CRYPTO_COINS = os.environ.get("CRYPTO_COINS", "bitcoin,ethereum,solana")
-CRYPTO_CURRENCY = os.environ.get("CRYPTO_CURRENCY", "aud")
-NEWS_COUNTRY = os.environ.get("NEWS_COUNTRY", "au")
-NEWS_CATEGORY = os.environ.get("NEWS_CATEGORY", "technology")
+# Weather town, crypto coins and news country/category are set on screen in the
+# admin panel (APIs tab) and read from settings each time content is gathered -
+# see feed_options(). The WEATHER_CITY / CRYPTO_* / NEWS_* environment variables
+# still work, but only as the starting value before anything is set on screen.
 NEWS_PAGE_SIZE = int(os.environ.get("NEWS_PAGE_SIZE", "5"))
 ENABLE_APOD_IMAGE = os.environ.get("ENABLE_APOD_IMAGE", "1") == "1"
 
@@ -111,7 +110,7 @@ def apply_branding():
     global BACKGROUND_COLOR, TEXT_COLOR, SUBTEXT_COLOR, HIGHLIGHT_COLOR
     global BUTTON_COLOR, BUTTON_HOVER, CARD_COLOR, CARD_BORDER, ANSWER_BOX_COLOR
 
-    brand = branding.get_branding(admin_panel.load_settings())
+    brand = branding.get_branding(settings_store.load_settings())
     palette = branding.palette_for(brand)
 
     BACKGROUND_COLOR = palette["BACKGROUND_COLOR"]
@@ -128,52 +127,26 @@ def apply_branding():
 
 
 # ─── PHOTO DISCOVERY ───────────────────────────────────────────────────────────
-def find_usb_photos():
-    photos = []
-    for base in USB_BASE_PATHS:
-        if os.path.isdir(base):
-            for root, _, files in os.walk(base):
-                for file_name in files:
-                    if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
-                        photos.append(os.path.join(root, file_name))
-    return photos
-
-
-def find_network_photos():
-    photos = []
-    if os.path.isdir(NETWORK_SHARE_MOUNT) and os.listdir(NETWORK_SHARE_MOUNT):
-        for root, _, files in os.walk(NETWORK_SHARE_MOUNT):
-            for file_name in files:
-                if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
-                    photos.append(os.path.join(root, file_name))
-    return photos
-
-def find_local_photos():
-    photos = []
-    if os.path.isdir(LOCAL_PHOTO_PATH):
-        for root, _, files in os.walk(LOCAL_PHOTO_PATH):
-            for file_name in files:
-                if Path(file_name).suffix.lower() in IMAGE_EXTENSIONS:
-                    photos.append(os.path.join(root, file_name))
-    return photos
-
 def get_photos():
-    settings = admin_panel.load_settings()
+    settings = settings_store.load_settings()
 
-    if not admin_panel.is_content_enabled(settings, "photos"):
+    if not settings_store.is_content_enabled(settings, "photos"):
         print("[PhotoFrame] Photos are disabled in the admin panel — skipping.")
         return []
 
-    usb_photos = find_usb_photos() if admin_panel.is_source_enabled(settings, "usb") else []
-    network_photos = find_network_photos() if admin_panel.is_source_enabled(settings, "network") else []
-    local_photos = find_local_photos() if admin_panel.is_source_enabled(settings, "local") else []
+    hidden = set(settings.get("hidden_photos") or [])
+    found = {}
+    for source in photo_sources.SOURCES:
+        found[source] = photo_sources.find_photos(source) if settings_store.is_source_enabled(settings, source) else []
 
-    photos = list(set(usb_photos + network_photos + local_photos))
+    every_photo = {path for paths in found.values() for path in paths}
+    photos = [path for path in every_photo if path not in hidden]
     random.shuffle(photos)
 
     print(
         f"[PhotoFrame] Loaded {len(photos)} photo(s) "
-        f"(USB: {len(usb_photos)}, Network: {len(network_photos)}, Local: {len(local_photos)})"
+        f"(USB: {len(found['usb'])}, Network: {len(found['network'])}, Local: {len(found['local'])}"
+        f"{f', {len(every_photo) - len(photos)} hidden' if len(every_photo) != len(photos) else ''})"
     )
 
     return photos
@@ -313,31 +286,39 @@ def use_dummy(feed_name):
 
 
 def fetch_api_data():
-    settings = admin_panel.load_settings()
+    settings = settings_store.load_settings()
     api_data = {}
 
-    if admin_panel.is_content_enabled(settings, "weather"):
-        weather = dummy_data.weather(WEATHER_CITY) if use_dummy("weather") else get_weather(WEATHER_CITY)
+    if settings_store.is_content_enabled(settings, "weather"):
+        options = settings_store.feed_options(settings, "weather")
+        town = options.get("town") or "Sydney"
+        if use_dummy("weather"):
+            weather = dummy_data.weather(town)
+        else:
+            weather = get_weather(town, lat=options.get("lat"), lon=options.get("lon"))
         if weather:
+            weather["source_label"] = options.get("label") or town
             api_data["weather"] = weather
 
-    if admin_panel.is_content_enabled(settings, "crypto"):
-        if use_dummy("crypto"):
-            crypto = dummy_data.crypto(CRYPTO_COINS, CRYPTO_CURRENCY)
-        else:
-            crypto = get_crypto_price(CRYPTO_COINS, CRYPTO_CURRENCY)
+    if settings_store.is_content_enabled(settings, "crypto"):
+        options = settings_store.feed_options(settings, "crypto")
+        coins, currency = options.get("coins") or "bitcoin", (options.get("currency") or "aud").lower()
+        crypto = dummy_data.crypto(coins, currency) if use_dummy("crypto") else get_crypto_price(coins, currency)
         if crypto:
             api_data["crypto"] = crypto
+            api_data["crypto_currency"] = currency
 
-    if admin_panel.is_content_enabled(settings, "news"):
+    if settings_store.is_content_enabled(settings, "news"):
+        options = settings_store.feed_options(settings, "news")
         if use_dummy("news"):
             news = dummy_data.news(NEWS_PAGE_SIZE)
         else:
-            news = get_news(NEWS_COUNTRY, NEWS_CATEGORY, NEWS_PAGE_SIZE)
+            news = get_news(options.get("country") or "au", options.get("category") or "general", NEWS_PAGE_SIZE)
         if news:
             api_data["news"] = news
+            api_data["news_label"] = f"{(options.get('country') or 'au').upper()} / {options.get('category') or 'general'}"
 
-    if admin_panel.is_content_enabled(settings, "apod"):
+    if settings_store.is_content_enabled(settings, "apod"):
         apod = dummy_data.apod() if use_dummy("apod") else get_apod()
         if apod:
             api_data["apod"] = apod
@@ -345,12 +326,12 @@ def fetch_api_data():
     all_custom = dummy_data.custom_apis(load_custom_api_configs()) if use_dummy("custom") else get_custom_apis()
     custom_apis = [
         item for item in all_custom
-        if admin_panel.is_content_enabled(settings, "custom", custom_name=item.get("name"))
+        if settings_store.is_content_enabled(settings, "custom", custom_name=item.get("name"))
     ]
     if custom_apis:
         api_data["custom"] = custom_apis
 
-    if admin_panel.is_content_enabled(settings, "trivia"):
+    if settings_store.is_content_enabled(settings, "trivia"):
         trivia = dummy_data.trivia() if use_dummy("trivia") else get_trivia()
         if trivia:
             api_data["trivia"] = trivia
@@ -373,7 +354,7 @@ def build_weather_slide(screen_size, fonts, weather):
     card = card_rect(screen_w, screen_h)
     draw_card(surface, card)
 
-    city = fonts["title"].render(weather.get("city", WEATHER_CITY), True, TEXT_COLOR)
+    city = fonts["title"].render(weather.get("city", ""), True, TEXT_COLOR)
     temp = fonts["title"].render(f"{round(weather.get('temp', 0))}°C", True, TEXT_COLOR)
     feels = fonts["body"].render(f"Feels like {round(weather.get('feels_like', 0))}°C", True, SUBTEXT_COLOR)
     desc = fonts["body"].render(weather.get("description", "").title(), True, TEXT_COLOR)
@@ -385,13 +366,13 @@ def build_weather_slide(screen_size, fonts, weather):
     surface.blit(desc, (100, 430))
     surface.blit(humidity, (100, 490))
 
-    footer = fonts["small"].render(f"Source: OpenWeather • {WEATHER_CITY}", True, SUBTEXT_COLOR)
+    footer = fonts["small"].render(f"Source: OpenWeather • {weather.get('source_label', weather.get('city', ''))}", True, SUBTEXT_COLOR)
     surface.blit(footer, (100, card.bottom - 30))
 
     return surface
 
 
-def build_crypto_slide(screen_size, fonts, crypto):
+def build_crypto_slide(screen_size, fonts, crypto, currency_code="aud"):
     screen_w, screen_h = screen_size
     surface = pygame.Surface((screen_w, screen_h))
     surface.fill(BACKGROUND_COLOR)
@@ -403,11 +384,13 @@ def build_crypto_slide(screen_size, fonts, crypto):
     draw_card(surface, card)
 
     y = 180
-    currency = CRYPTO_CURRENCY.upper()
+    currency = currency_code.upper()
 
     for coin_name, values in crypto.items():
-        price = values.get(CRYPTO_CURRENCY)
-        change = values.get(f"{CRYPTO_CURRENCY}_24h_change")
+        if not isinstance(values, dict):
+            continue  # e.g. an error message from CoinGecko instead of a coin
+        price = values.get(currency_code)
+        change = values.get(f"{currency_code}_24h_change")
 
         coin_text = fonts["body"].render(coin_name.replace("-", " ").title(), True, TEXT_COLOR)
         price_text = fonts["body"].render(f"{currency} {price:,.2f}" if isinstance(price, (int, float)) else "N/A", True, TEXT_COLOR)
@@ -432,7 +415,7 @@ def build_crypto_slide(screen_size, fonts, crypto):
     return surface
 
 
-def build_news_slide(screen_size, fonts, news_items):
+def build_news_slide(screen_size, fonts, news_items, label=""):
     screen_w, screen_h = screen_size
     surface = pygame.Surface((screen_w, screen_h))
     surface.fill(BACKGROUND_COLOR)
@@ -469,7 +452,7 @@ def build_news_slide(screen_size, fonts, news_items):
         if y > card.bottom - 90:
             break
 
-    footer = fonts["small"].render(f"Source: News API • {NEWS_COUNTRY.upper()} / {NEWS_CATEGORY}", True, SUBTEXT_COLOR)
+    footer = fonts["small"].render(f"Source: News API • {label}" if label else "Source: News API", True, SUBTEXT_COLOR)
     surface.blit(footer, (100, card.bottom - 30))
 
     return surface
@@ -675,14 +658,14 @@ def build_api_slides(screen_size, fonts, api_data, trivia_item=None):
         slides.append({
             "kind": "api",
             "name": "crypto",
-            "surface": build_crypto_slide(screen_size, fonts, api_data["crypto"]),
+            "surface": build_crypto_slide(screen_size, fonts, api_data["crypto"], api_data.get("crypto_currency", "aud")),
         })
 
     if api_data.get("news"):
         slides.append({
             "kind": "api",
             "name": "news",
-            "surface": build_news_slide(screen_size, fonts, api_data["news"]),
+            "surface": build_news_slide(screen_size, fonts, api_data["news"], api_data.get("news_label", "")),
         })
 
     if api_data.get("apod"):
@@ -795,7 +778,7 @@ def run_slideshow(screen):
     last_switch = time.time()
     resize_pending_since = None  # dev mode: time of the most recent resize event
 
-    admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
+    admin_key = settings_store.resolve_key(settings_store.load_settings().get("admin_hotkey", "f1"))
 
     clock = pygame.time.Clock()
 
@@ -836,7 +819,7 @@ def run_slideshow(screen):
                     if action:
                         return action  # restart / exit - main() carries it out once pygame is closed
 
-                    admin_key = admin_panel.resolve_key(admin_panel.load_settings().get("admin_hotkey", "f1"))
+                    admin_key = settings_store.resolve_key(settings_store.load_settings().get("admin_hotkey", "f1"))
                     brand, palette = apply_branding()  # colours / logo may have changed in the panel
                     theme_colors = dict(palette)
 
@@ -930,6 +913,10 @@ def main():
     args = parse_args()
     DEV_MODE = args.dev
     DUMMY_MODE = args.dummy
+
+    # frames set up before config/local/ existed: move their settings over (only does anything once)
+    from core import storage
+    storage.migrate_to_local()
 
     pygame.init()
 

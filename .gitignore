@@ -4,9 +4,24 @@ __pycache__/
 *.pyo
 
 # Secrets and API keys — NEVER commit these
+config/secrets.env
+secrets.env
 secrets.yaml
 secrets.yml
 .env
+*.env
+!*.env.example
+
+# PIN hashes (core/access.py)
+config/pins.json
+
+# This frame's own settings, API list and logo — set from the admin panel,
+# different on every frame, so they stay out of git (see core/storage.py)
+config/local/
+assets/branding/logo.*
+
+# half-written saves (core/storage.py writes to .tmp then swaps it in)
+*.tmp
 
 # VS Code settings
 .vscode/
